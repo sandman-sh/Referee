@@ -32,3 +32,7 @@ Thumbs.db
 
 # TypeScript build info
 *.tsbuildinfo
+
+# Build artifacts
+.deck-build/
+.deck-output/

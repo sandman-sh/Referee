@@ -228,6 +228,20 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: var(--shadow-sm);
 }
 
+.btn--xs {
+  padding: 4px 10px;
+  font-size: 11.5px;
+  border-radius: var(--radius-sm);
+  box-shadow: 1.5px 1.5px 0px var(--shadow-color);
+  gap: 5px;
+  line-height: 1.2;
+}
+
+.btn--xs:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0px var(--shadow-color);
+}
+
 .btn--lg {
   padding: 13px 26px;
   font-size: 15.5px;

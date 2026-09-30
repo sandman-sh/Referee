@@ -36,7 +36,14 @@ import {
   Users,
   ExternalLink,
   Sliders,
-  X
+  X,
+  LogOut,
+  FolderPlus,
+  LogIn,
+  Building,
+  Briefcase,
+  ShoppingBag,
+  ArrowRight
 } from 'lucide-react';
 import {
   SpeakerRole,
@@ -172,6 +179,179 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
     sealedTimestamp: null,
     recordHash: ''
   });
+
+  // Room Gateway & Case Preparation State
+  const [isRoomActive, setIsRoomActive] = useState<boolean>(Boolean(initialRoomId));
+  const [lobbyTab, setLobbyTab] = useState<'create' | 'join'>('create');
+
+  // Case Preparation Form State
+  const [prepTitle, setPrepTitle] = useState<string>('Security Deposit Return Dispute');
+  const [prepScenario, setPrepScenario] = useState<'deposit' | 'freelance' | 'marketplace' | 'custom'>('deposit');
+  const [prepPartyA, setPrepPartyA] = useState<string>('Meera Sharma (Tenant)');
+  const [prepPartyB, setPrepPartyB] = useState<string>('Mr. R.K. Khanna (Landlord)');
+  const [prepRole, setPrepRole] = useState<SpeakerRole>(initialRole || 'a');
+
+  // Join Existing Room Form State
+  const [joinRoomCode, setJoinRoomCode] = useState<string>(initialRoomId || '');
+  const [joinRole, setJoinRole] = useState<SpeakerRole>(initialRole || 'b');
+  const [joinName, setJoinName] = useState<string>('');
+  const [joinError, setJoinError] = useState<string>('');
+  const [isJoiningLoading, setIsJoiningLoading] = useState<boolean>(false);
+
+  // In-session Docket controls
+  const [isDocketEditOpen, setIsDocketEditOpen] = useState<boolean>(false);
+  const [copiedRoomCode, setCopiedRoomCode] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (initialRoomId) {
+      setJoinRoomCode(initialRoomId);
+      setIsRoomActive(true);
+    }
+    if (initialRole) {
+      setLocalUserRole(initialRole);
+      setPrepRole(initialRole);
+      setJoinRole(initialRole);
+    }
+  }, [initialRoomId, initialRole]);
+
+  const handleSelectScenarioTemplate = (key: 'deposit' | 'freelance' | 'marketplace' | 'custom') => {
+    setPrepScenario(key);
+    playTactileSound('click');
+    if (key === 'deposit') {
+      setPrepTitle('Security Deposit Return Dispute');
+      setPrepPartyA('Meera Sharma (Tenant)');
+      setPrepPartyB('Mr. R.K. Khanna (Landlord)');
+    } else if (key === 'freelance') {
+      setPrepTitle('Freelance Design Scope & Final Payment Dispute');
+      setPrepPartyA('Aditi Roy (Designer)');
+      setPrepPartyB('Vikram Mehta (Client)');
+    } else if (key === 'marketplace') {
+      setPrepTitle('Marketplace Order Condition & Refund Dispute');
+      setPrepPartyA('Rohit Verma (Buyer)');
+      setPrepPartyB('Sana Malik (Seller)');
+    } else {
+      setPrepTitle('Commercial Dispute Hearing');
+      setPrepPartyA('Party A (Claimant)');
+      setPrepPartyB('Party B (Respondent)');
+    }
+  };
+
+  const handleCreateRoom = async () => {
+    playTactileSound('click');
+    const newRoomId = 'REF-' + new Date().getFullYear() + '-' + Math.floor(1000 + Math.random() * 9000);
+    const sc = PRESET_SCENARIOS[prepScenario as keyof typeof PRESET_SCENARIOS];
+
+    const newCaseState: CaseSessionState = {
+      id: newRoomId,
+      title: prepTitle.trim() || 'Dispute Hearing Docket',
+      partyA: prepPartyA.trim() || 'Party A (Claimant)',
+      partyB: prepPartyB.trim() || 'Party B (Respondent)',
+      scenario: prepScenario,
+      currentPhase: 1,
+      activeSpeaker: prepRole,
+      isMicActive: false,
+      claimsCountA: 0,
+      claimsCountB: 0,
+      disagreementIndex: 0,
+      pinnedClaims: [],
+      transcript: [],
+      settlement: sc ? { ...sc.settlement } : {
+        obligationA: 'Deliver agreed responsibilities or materials.',
+        obligationB: 'Release balanced funds or execute requested resolution.',
+        financialAmount: 'Net balance to be determined during hearing.',
+        executionDeadline: 'Within 7 business days of execution.',
+        groundedQuotes: []
+      },
+      amendmentA: '',
+      amendmentB: '',
+      signedA: false,
+      signedB: false,
+      isSealed: false,
+      sealedTimestamp: null,
+      recordHash: ''
+    };
+
+    setCaseState(newCaseState);
+    caseStateRef.current = newCaseState;
+    setLocalUserRole(prepRole);
+    setSessionTimer(0);
+    setAirtimeA(1);
+    setAirtimeB(1);
+    setActiveTab('matrix');
+    setIntegrityVerified(null);
+    setAuditLog([
+      { id: 'created', time: '00:00', text: `Room ${newRoomId} prepared by ${prepRole === 'a' ? prepPartyA : prepRole === 'b' ? prepPartyB : 'Referee'}.`, type: 'system' }
+    ]);
+
+    try {
+      await getOrCreateRoom(newRoomId, newCaseState);
+    } catch (err) {
+      console.warn('Supabase room create exception (running local state):', err);
+    }
+
+    setIsRoomActive(true);
+    playTactileSound('success');
+  };
+
+  const handleJoinRoom = async () => {
+    if (!joinRoomCode.trim()) {
+      setJoinError('Please enter a valid Room Code (e.g. REF-2026-1234)');
+      playTactileSound('alert');
+      return;
+    }
+    setJoinError('');
+    setIsJoiningLoading(true);
+    playTactileSound('click');
+
+    try {
+      const code = joinRoomCode.trim().toUpperCase();
+      const { state: remoteState } = await getOrCreateRoom(code, {
+        id: code,
+        title: 'Mediation Hearing',
+        partyA: 'Party A',
+        partyB: joinName.trim() || 'Party B',
+        activeSpeaker: joinRole
+      });
+
+      if (remoteState) {
+        if (joinName.trim()) {
+          if (joinRole === 'b') remoteState.partyB = joinName.trim();
+          if (joinRole === 'a') remoteState.partyA = joinName.trim();
+        }
+        setCaseState(remoteState);
+        caseStateRef.current = remoteState;
+      }
+      setLocalUserRole(joinRole);
+      setIsRoomActive(true);
+      playTactileSound('success');
+      addAuditLog(`Joined room ${code} as ${joinRole === 'a' ? 'Party A' : joinRole === 'b' ? 'Party B' : 'Referee'}.`, 'system');
+    } catch (e: any) {
+      setJoinError('Could not connect to room. Please check the room code.');
+      playTactileSound('alert');
+    } finally {
+      setIsJoiningLoading(false);
+    }
+  };
+
+  const handleExitRoom = () => {
+    playTactileSound('click');
+    if (caseState.transcript.length > 0 && !caseState.isSealed) {
+      if (!confirm('Leave this live hearing? You can rejoin anytime using room code: ' + caseState.id)) {
+        return;
+      }
+    }
+    speechService.stopStreaming();
+    setActiveMediaStream(null);
+    setIsRecordingAudio(false);
+    setIsRoomActive(false);
+  };
+
+  const copyRoomCode = () => {
+    navigator.clipboard.writeText(caseState.id);
+    setCopiedRoomCode(true);
+    playTactileSound('click');
+    setTimeout(() => setCopiedRoomCode(false), 2000);
+  };
 
   // Local Participant Role & Calling States
   const [localUserRole, setLocalUserRole] = useState<SpeakerRole>(initialRole || 'a');
@@ -340,7 +520,8 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
 
   // 3. Supabase Realtime Room Synchronization
   useEffect(() => {
-    const currentRoomId = initialRoomId || caseState.id;
+    if (!isRoomActive) return;
+    const currentRoomId = caseState.id;
     let isMounted = true;
 
     // Load or create room in Supabase
@@ -413,7 +594,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
       unsubscribe();
       peerConnectionRef.current?.close();
     };
-  }, [initialRoomId]);
+  }, [isRoomActive, caseState.id]);
 
   // Peer audio start
   const connectPeerCall = async () => {
@@ -994,6 +1175,477 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
   const pctA = Math.round((airtimeA / totalAirtime) * 100);
   const pctB = 100 - pctA;
 
+  // LOBBY: Case Preparation & Room Gateway (Shown when no room is active)
+  if (!isRoomActive) {
+    return (
+      <div style={{ maxWidth: 1080, margin: '0 auto', padding: '0 24px 60px' }}>
+        {/* Top Header Card */}
+        <div style={{
+          background: 'var(--surface)',
+          border: 'var(--border-width) solid var(--border)',
+          borderRadius: 'var(--radius-xl)',
+          boxShadow: 'var(--shadow-lg)',
+          padding: '36px 32px',
+          marginBottom: 28,
+          position: 'relative'
+        }}>
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 14px',
+            background: 'var(--accent-yellow)',
+            border: '2px solid var(--border)',
+            borderRadius: 'var(--radius-pill)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 12,
+            fontWeight: 800,
+            boxShadow: 'var(--shadow-sm)',
+            marginBottom: 16
+          }}>
+            <span>★</span>
+            <span>DISPUTE PREPARATION &amp; ROOM GATEWAY</span>
+          </div>
+
+          <h2 style={{ fontSize: 'clamp(28px, 3.2vw, 42px)', lineHeight: 1.15, marginBottom: 12, fontWeight: 800 }}>
+            Prepare the Case Docket or Join a Hearing
+          </h2>
+          <p style={{ fontSize: 16, color: 'var(--ink-muted)', maxWidth: 680, lineHeight: 1.6, margin: 0 }}>
+            Every mediation requires an active room. Create a new case docket with dispute details to invite Party B, or enter an existing room code to join an ongoing session.
+          </p>
+        </div>
+
+        {/* Tab Switcher */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 24 }}>
+          <button
+            className={`btn ${lobbyTab === 'create' ? 'btn--primary' : 'btn--ghost'}`}
+            style={{ padding: '14px 20px', fontSize: 15 }}
+            onClick={() => { playTactileSound('click'); setLobbyTab('create'); }}
+          >
+            <FolderPlus size={18} />
+            <span>Create New Case Docket &amp; Room</span>
+          </button>
+          <button
+            className={`btn ${lobbyTab === 'join' ? 'btn--yellow' : 'btn--ghost'}`}
+            style={{ padding: '14px 20px', fontSize: 15 }}
+            onClick={() => { playTactileSound('click'); setLobbyTab('join'); }}
+          >
+            <LogIn size={18} />
+            <span>Join Existing Hearing Room</span>
+          </button>
+        </div>
+
+        {/* TAB 1: CREATE NEW CASE ROOM */}
+        {lobbyTab === 'create' && (
+          <div style={{
+            background: 'var(--surface)',
+            border: 'var(--border-width) solid var(--border)',
+            borderRadius: 'var(--radius-xl)',
+            boxShadow: 'var(--shadow-md)',
+            padding: '32px 30px'
+          }}>
+            <h3 style={{ fontSize: 20, fontWeight: 800, marginBottom: 6 }}>1. Select Case Scenario Template</h3>
+            <p style={{ fontSize: 14, color: 'var(--ink-muted)', marginBottom: 20 }}>
+              Choose a template to quickly populate verified scenario terms, or choose Custom for a blank docket.
+            </p>
+
+            {/* Scenario Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 14, marginBottom: 28 }}>
+              <div
+                onClick={() => handleSelectScenarioTemplate('deposit')}
+                style={{
+                  padding: 16,
+                  borderRadius: 'var(--radius-lg)',
+                  border: `2.5px solid ${prepScenario === 'deposit' ? 'var(--primary)' : 'var(--border)'}`,
+                  background: prepScenario === 'deposit' ? 'var(--primary-subtle)' : 'var(--bg)',
+                  boxShadow: prepScenario === 'deposit' ? '4px 4px 0px var(--primary)' : 'var(--shadow-sm)',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <Building size={18} color="var(--primary)" />
+                  <span style={{ fontWeight: 800, fontSize: 14 }}>Housing Deposit</span>
+                </div>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-muted)', margin: 0, lineHeight: 1.4 }}>
+                  Tenancy security deposit deduction, walkthrough claims, and return timeline.
+                </p>
+              </div>
+
+              <div
+                onClick={() => handleSelectScenarioTemplate('freelance')}
+                style={{
+                  padding: 16,
+                  borderRadius: 'var(--radius-lg)',
+                  border: `2.5px solid ${prepScenario === 'freelance' ? 'var(--primary)' : 'var(--border)'}`,
+                  background: prepScenario === 'freelance' ? 'var(--primary-subtle)' : 'var(--bg)',
+                  boxShadow: prepScenario === 'freelance' ? '4px 4px 0px var(--primary)' : 'var(--shadow-sm)',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <Briefcase size={18} color="var(--primary)" />
+                  <span style={{ fontWeight: 800, fontSize: 14 }}>Freelance Contract</span>
+                </div>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-muted)', margin: 0, lineHeight: 1.4 }}>
+                  Scope creep dispute, design asset delivery, and final milestone invoice payment.
+                </p>
+              </div>
+
+              <div
+                onClick={() => handleSelectScenarioTemplate('marketplace')}
+                style={{
+                  padding: 16,
+                  borderRadius: 'var(--radius-lg)',
+                  border: `2.5px solid ${prepScenario === 'marketplace' ? 'var(--primary)' : 'var(--border)'}`,
+                  background: prepScenario === 'marketplace' ? 'var(--primary-subtle)' : 'var(--bg)',
+                  boxShadow: prepScenario === 'marketplace' ? '4px 4px 0px var(--primary)' : 'var(--shadow-sm)',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <ShoppingBag size={18} color="var(--primary)" />
+                  <span style={{ fontWeight: 800, fontSize: 14 }}>Marketplace Goods</span>
+                </div>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-muted)', margin: 0, lineHeight: 1.4 }}>
+                  Item delivery condition, packaging seal dispute, and partial refund discount.
+                </p>
+              </div>
+
+              <div
+                onClick={() => handleSelectScenarioTemplate('custom')}
+                style={{
+                  padding: 16,
+                  borderRadius: 'var(--radius-lg)',
+                  border: `2.5px solid ${prepScenario === 'custom' ? 'var(--primary)' : 'var(--border)'}`,
+                  background: prepScenario === 'custom' ? 'var(--primary-subtle)' : 'var(--bg)',
+                  boxShadow: prepScenario === 'custom' ? '4px 4px 0px var(--primary)' : 'var(--shadow-sm)',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <Scale size={18} color="var(--primary)" />
+                  <span style={{ fontWeight: 800, fontSize: 14 }}>Custom Hearing</span>
+                </div>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-muted)', margin: 0, lineHeight: 1.4 }}>
+                  Blank docket for arbitrary civil, commercial, or bilateral disputes.
+                </p>
+              </div>
+            </div>
+
+            <h3 style={{ fontSize: 20, fontWeight: 800, marginBottom: 6 }}>2. Case Docket Parameters</h3>
+            <p style={{ fontSize: 14, color: 'var(--ink-muted)', marginBottom: 18 }}>
+              Identify the dispute matter and the names of both participating parties.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 28 }}>
+              <div>
+                <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', marginBottom: 6, color: 'var(--ink-dim)' }}>
+                  Dispute Hearing Title
+                </label>
+                <input
+                  type="text"
+                  value={prepTitle}
+                  onChange={(e) => setPrepTitle(e.target.value)}
+                  placeholder="e.g. Tenancy Handover & Deposit Settlement"
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    fontSize: 15,
+                    fontWeight: 600,
+                    border: '2.5px solid var(--border)',
+                    borderRadius: 'var(--radius-md)',
+                    boxShadow: '3px 3px 0px var(--shadow-color)'
+                  }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                <div>
+                  <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', marginBottom: 6, color: 'var(--primary)' }}>
+                    Party A (Claimant)
+                  </label>
+                  <input
+                    type="text"
+                    value={prepPartyA}
+                    onChange={(e) => setPrepPartyA(e.target.value)}
+                    placeholder="e.g. Meera Sharma (Tenant)"
+                    style={{
+                      width: '100%',
+                      padding: '12px 16px',
+                      fontSize: 14.5,
+                      fontWeight: 600,
+                      border: '2.5px solid var(--border)',
+                      borderRadius: 'var(--radius-md)',
+                      boxShadow: '3px 3px 0px var(--shadow-color)'
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', marginBottom: 6, color: '#D97706' }}>
+                    Party B (Respondent)
+                  </label>
+                  <input
+                    type="text"
+                    value={prepPartyB}
+                    onChange={(e) => setPrepPartyB(e.target.value)}
+                    placeholder="e.g. Mr. R.K. Khanna (Landlord)"
+                    style={{
+                      width: '100%',
+                      padding: '12px 16px',
+                      fontSize: 14.5,
+                      fontWeight: 600,
+                      border: '2.5px solid var(--border)',
+                      borderRadius: 'var(--radius-md)',
+                      boxShadow: '3px 3px 0px var(--shadow-color)'
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <h3 style={{ fontSize: 20, fontWeight: 800, marginBottom: 6 }}>3. Your Persona in this Hearing</h3>
+            <p style={{ fontSize: 14, color: 'var(--ink-muted)', marginBottom: 18 }}>
+              Select which role you are operating from when you enter the room:
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 32 }}>
+              <div
+                onClick={() => { playTactileSound('click'); setPrepRole('a'); }}
+                style={{
+                  padding: '14px 16px',
+                  borderRadius: 'var(--radius-md)',
+                  border: `2.5px solid ${prepRole === 'a' ? 'var(--primary)' : 'var(--border)'}`,
+                  background: prepRole === 'a' ? 'var(--primary-subtle)' : 'var(--bg)',
+                  boxShadow: prepRole === 'a' ? '3px 3px 0px var(--primary)' : 'var(--shadow-sm)',
+                  cursor: 'pointer',
+                  textAlign: 'center'
+                }}
+              >
+                <div style={{ fontWeight: 800, fontSize: 14, color: 'var(--primary)', marginBottom: 4 }}>
+                  Party A (Claimant)
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--ink-muted)' }}>
+                  Presenting claims or requesting remedy
+                </div>
+              </div>
+
+              <div
+                onClick={() => { playTactileSound('click'); setPrepRole('b'); }}
+                style={{
+                  padding: '14px 16px',
+                  borderRadius: 'var(--radius-md)',
+                  border: `2.5px solid ${prepRole === 'b' ? '#D97706' : 'var(--border)'}`,
+                  background: prepRole === 'b' ? '#FEF3C7' : 'var(--bg)',
+                  boxShadow: prepRole === 'b' ? '3px 3px 0px #D97706' : 'var(--shadow-sm)',
+                  cursor: 'pointer',
+                  textAlign: 'center'
+                }}
+              >
+                <div style={{ fontWeight: 800, fontSize: 14, color: '#D97706', marginBottom: 4 }}>
+                  Party B (Respondent)
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--ink-muted)' }}>
+                  Responding to claims or defense
+                </div>
+              </div>
+
+              <div
+                onClick={() => { playTactileSound('click'); setPrepRole('ref'); }}
+                style={{
+                  padding: '14px 16px',
+                  borderRadius: 'var(--radius-md)',
+                  border: `2.5px solid ${prepRole === 'ref' ? 'var(--accent-green)' : 'var(--border)'}`,
+                  background: prepRole === 'ref' ? '#D1FAE5' : 'var(--bg)',
+                  boxShadow: prepRole === 'ref' ? '3px 3px 0px var(--accent-green)' : 'var(--shadow-sm)',
+                  cursor: 'pointer',
+                  textAlign: 'center'
+                }}
+              >
+                <div style={{ fontWeight: 800, fontSize: 14, color: '#065F46', marginBottom: 4 }}>
+                  Referee (Arbiter)
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--ink-muted)' }}>
+                  Neutral third-party presiding
+                </div>
+              </div>
+            </div>
+
+            <button
+              className="btn btn--primary btn--lg"
+              style={{ width: '100%', padding: '16px', fontSize: 16 }}
+              onClick={handleCreateRoom}
+            >
+              <span className="dot"></span>
+              <span>Create Hearing Room &amp; Launch Case Docket</span>
+              <ArrowRight size={18} />
+            </button>
+          </div>
+        )}
+
+        {/* TAB 2: JOIN EXISTING ROOM */}
+        {lobbyTab === 'join' && (
+          <div style={{
+            background: 'var(--surface)',
+            border: 'var(--border-width) solid var(--border)',
+            borderRadius: 'var(--radius-xl)',
+            boxShadow: 'var(--shadow-md)',
+            padding: '36px 32px',
+            maxWidth: 680,
+            margin: '0 auto'
+          }}>
+            <h3 style={{ fontSize: 22, fontWeight: 800, marginBottom: 8 }}>Enter Room Code</h3>
+            <p style={{ fontSize: 14, color: 'var(--ink-muted)', marginBottom: 24, lineHeight: 1.5 }}>
+              Party A or the mediator has created a hearing docket and shared a Room Code or link with you. Enter the code below to connect.
+            </p>
+
+            {joinError && (
+              <div style={{
+                padding: '12px 16px',
+                background: '#FEE2E2',
+                border: '2px solid #EF4444',
+                borderRadius: 'var(--radius-md)',
+                color: '#B91C1C',
+                fontSize: 13,
+                fontWeight: 700,
+                marginBottom: 20
+              }}>
+                {joinError}
+              </div>
+            )}
+
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', marginBottom: 6, color: 'var(--ink-dim)' }}>
+                Mediation Room Code
+              </label>
+              <input
+                type="text"
+                value={joinRoomCode}
+                onChange={(e) => { setJoinRoomCode(e.target.value); setJoinError(''); }}
+                placeholder="e.g. REF-2026-5792"
+                className="mono"
+                style={{
+                  width: '100%',
+                  padding: '14px 18px',
+                  fontSize: 18,
+                  fontWeight: 800,
+                  letterSpacing: '0.05em',
+                  textTransform: 'uppercase',
+                  border: '2.5px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: '3px 3px 0px var(--shadow-color)'
+                }}
+              />
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', marginBottom: 6, color: 'var(--ink-dim)' }}>
+                Your Assigned Role in this Hearing
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                <div
+                  onClick={() => { playTactileSound('click'); setJoinRole('b'); }}
+                  style={{
+                    padding: '12px 14px',
+                    borderRadius: 'var(--radius-md)',
+                    border: `2.5px solid ${joinRole === 'b' ? '#D97706' : 'var(--border)'}`,
+                    background: joinRole === 'b' ? '#FEF3C7' : 'var(--bg)',
+                    boxShadow: joinRole === 'b' ? '3px 3px 0px #D97706' : 'var(--shadow-sm)',
+                    cursor: 'pointer',
+                    textAlign: 'center'
+                  }}
+                >
+                  <div style={{ fontWeight: 800, fontSize: 13, color: '#D97706' }}>
+                    Party B (Respondent)
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-muted)' }}>
+                    Invited Respondent
+                  </div>
+                </div>
+
+                <div
+                  onClick={() => { playTactileSound('click'); setJoinRole('a'); }}
+                  style={{
+                    padding: '12px 14px',
+                    borderRadius: 'var(--radius-md)',
+                    border: `2.5px solid ${joinRole === 'a' ? 'var(--primary)' : 'var(--border)'}`,
+                    background: joinRole === 'a' ? 'var(--primary-subtle)' : 'var(--bg)',
+                    boxShadow: joinRole === 'a' ? '3px 3px 0px var(--primary)' : 'var(--shadow-sm)',
+                    cursor: 'pointer',
+                    textAlign: 'center'
+                  }}
+                >
+                  <div style={{ fontWeight: 800, fontSize: 13, color: 'var(--primary)' }}>
+                    Party A (Claimant)
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-muted)' }}>
+                    Claimant Party
+                  </div>
+                </div>
+
+                <div
+                  onClick={() => { playTactileSound('click'); setJoinRole('ref'); }}
+                  style={{
+                    padding: '12px 14px',
+                    borderRadius: 'var(--radius-md)',
+                    border: `2.5px solid ${joinRole === 'ref' ? 'var(--accent-green)' : 'var(--border)'}`,
+                    background: joinRole === 'ref' ? '#D1FAE5' : 'var(--bg)',
+                    boxShadow: joinRole === 'ref' ? '3px 3px 0px var(--accent-green)' : 'var(--shadow-sm)',
+                    cursor: 'pointer',
+                    textAlign: 'center'
+                  }}
+                >
+                  <div style={{ fontWeight: 800, fontSize: 13, color: '#065F46' }}>
+                    Referee (Observer)
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-muted)' }}>
+                    Neutral / Mediator
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 28 }}>
+              <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', marginBottom: 6, color: 'var(--ink-dim)' }}>
+                Your Name / Organization (Optional)
+              </label>
+              <input
+                type="text"
+                value={joinName}
+                onChange={(e) => setJoinName(e.target.value)}
+                placeholder="e.g. Mr. R.K. Khanna"
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  fontSize: 14.5,
+                  fontWeight: 600,
+                  border: '2.5px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: '3px 3px 0px var(--shadow-color)'
+                }}
+              />
+            </div>
+
+            <button
+              className="btn btn--primary btn--lg"
+              style={{ width: '100%', padding: '16px', fontSize: 16 }}
+              onClick={handleJoinRoom}
+              disabled={isJoiningLoading}
+            >
+              <LogIn size={18} />
+              <span>{isJoiningLoading ? 'Connecting to Room...' : 'Connect & Enter Hearing Room'}</span>
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ACTIVE LIVE MEDIATION SESSION
   return (
     <div style={{ maxWidth: 1440, margin: '0 auto', padding: '0 24px 60px' }}>
       <div style={{
@@ -1003,47 +1655,66 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
       }} className="console-grid-responsive">
         {/* Left Sidebar: Controls & Setup */}
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          {/* Case Metadata */}
+          {/* Active Hearing Room Docket Header */}
           <div style={{
             background: 'var(--surface)',
             border: 'var(--border-width) solid var(--border)',
             borderRadius: 'var(--radius-xl)',
             boxShadow: 'var(--shadow-md)',
-            padding: 24
+            padding: 22
           }}>
             <audio ref={remoteAudioRef} autoPlay style={{ display: 'none' }} />
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
-              <div>
-                <h3 style={{ fontSize: 17, fontWeight: 800, margin: 0 }}>Case Parameters</h3>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-                  <span className="pill mono" style={{ fontSize: 10, padding: '2px 6px', background: '#ECFDF5', color: '#065F46', borderColor: '#065F46' }}>
-                    <span className="dot" style={{ width: 6, height: 6, background: '#10B981' }}></span>
-                    {peerCount} Connected
+            {/* Room Identifier & Status */}
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+              marginBottom: 16,
+              paddingBottom: 16,
+              borderBottom: '2px dashed var(--border)'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span className="pill pill--purple mono" style={{ fontSize: 11, padding: '3px 8px' }}>
+                    {caseState.id}
                   </span>
-                  <span className="pill pill--purple mono" style={{ fontSize: 10, padding: '2px 6px' }}>{caseState.id}</span>
+                  <button
+                    className="btn btn--xs btn--ghost"
+                    onClick={copyRoomCode}
+                    title="Copy Room ID"
+                    style={{ padding: '3px 7px' }}
+                  >
+                    {copiedRoomCode ? <Check size={12} color="#059669" /> : <Copy size={12} />}
+                    <span>{copiedRoomCode ? 'Copied' : 'Copy'}</span>
+                  </button>
                 </div>
+                <span className="pill mono" style={{ fontSize: 10, padding: '3px 8px', background: '#ECFDF5', color: '#065F46', borderColor: '#065F46' }}>
+                  <span className="dot" style={{ width: 6, height: 6, background: '#10B981' }}></span>
+                  {peerCount} Connected
+                </span>
               </div>
 
-              <div style={{ display: 'flex', gap: 6 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                 <button
                   className="btn btn--xs btn--primary"
                   onClick={() => { playTactileSound('click'); setIsInviteModalOpen(true); }}
                   title="Invite other participants via share link"
+                  style={{ width: '100%', justifyContent: 'center' }}
                 >
-                  <Share2 size={13} />
-                  <span>Invite</span>
+                  <Share2 size={12} />
+                  <span>Invite Link</span>
                 </button>
-                {onOpenDashboard && (
-                  <button
-                    className="btn btn--xs btn--secondary"
-                    onClick={() => { playTactileSound('click'); onOpenDashboard(); }}
-                    title="Open Case Documents Vault"
-                  >
-                    <FileText size={13} />
-                    <span>Vault</span>
-                  </button>
-                )}
+
+                <button
+                  className="btn btn--xs btn--ghost"
+                  onClick={handleExitRoom}
+                  title="Leave this hearing room and return to case preparation"
+                  style={{ width: '100%', justifyContent: 'center' }}
+                >
+                  <LogOut size={12} />
+                  <span>Exit Room</span>
+                </button>
               </div>
             </div>
 
@@ -1053,7 +1724,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
               background: isPeerAudioConnected ? '#ECFDF5' : 'var(--bg)',
               border: `1.5px solid ${isPeerAudioConnected ? '#065F46' : 'var(--border)'}`,
               borderRadius: 'var(--radius-md)',
-              marginBottom: 14,
+              marginBottom: 16,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
@@ -1078,125 +1749,90 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
               </button>
             </div>
 
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4, color: 'var(--ink-dim)' }}>
-                Dispute Title
-              </label>
-              <input
-                type="text"
-                value={caseState.title}
-                onChange={(e) => setCaseState({ ...caseState, title: e.target.value })}
-                style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  border: '2.5px solid var(--border)',
-                  borderRadius: 'var(--radius-md)',
-                  boxShadow: '2px 2px 0px var(--shadow-color)',
-                  background: 'var(--bg)',
-                  fontWeight: 600,
-                  fontSize: 13.5,
-                  color: 'var(--ink)'
-                }}
-              />
+            {/* Case Dossier Summary Card */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', color: 'var(--ink-dim)' }}>
+                  Case Docket
+                </span>
+                <button
+                  onClick={() => setIsDocketEditOpen(!isDocketEditOpen)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11, color: 'var(--primary)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4 }}
+                >
+                  <Edit3 size={11} />
+                  <span>{isDocketEditOpen ? 'Done' : 'Edit Names'}</span>
+                </button>
+              </div>
+
+              {!isDocketEditOpen ? (
+                <div style={{ background: 'var(--bg)', border: '1.5px solid var(--border)', borderRadius: 'var(--radius-md)', padding: '12px 14px' }}>
+                  <div style={{ fontWeight: 800, fontSize: 13.5, color: 'var(--ink)', marginBottom: 8, lineHeight: 1.3 }}>
+                    {caseState.title}
+                  </div>
+                  
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 }}>
+                      <span style={{ fontWeight: 700, color: 'var(--primary)' }}>Claimant (A):</span>
+                      <span style={{ fontWeight: 600, color: 'var(--ink)' }}>{caseState.partyA}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 }}>
+                      <span style={{ fontWeight: 700, color: '#D97706' }}>Respondent (B):</span>
+                      <span style={{ fontWeight: 600, color: 'var(--ink)' }}>{caseState.partyB}</span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, background: 'var(--bg)', border: '1.5px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 12 }}>
+                  <div>
+                    <label style={{ fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700, display: 'block', marginBottom: 2 }}>Title</label>
+                    <input
+                      type="text"
+                      value={caseState.title}
+                      onChange={(e) => setCaseState({ ...caseState, title: e.target.value })}
+                      style={{ width: '100%', padding: '6px 8px', fontSize: 12 }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700, display: 'block', marginBottom: 2 }}>Party A</label>
+                    <input
+                      type="text"
+                      value={caseState.partyA}
+                      onChange={(e) => setCaseState({ ...caseState, partyA: e.target.value })}
+                      style={{ width: '100%', padding: '6px 8px', fontSize: 12 }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700, display: 'block', marginBottom: 2 }}>Party B</label>
+                    <input
+                      type="text"
+                      value={caseState.partyB}
+                      onChange={(e) => setCaseState({ ...caseState, partyB: e.target.value })}
+                      style={{ width: '100%', padding: '6px 8px', fontSize: 12 }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4, color: 'var(--ink-dim)' }}>
-                Party A (Claimant)
-              </label>
-              <input
-                type="text"
-                value={caseState.partyA}
-                onChange={(e) => setCaseState({ ...caseState, partyA: e.target.value })}
-                style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  border: '2.5px solid var(--border)',
-                  borderRadius: 'var(--radius-md)',
-                  boxShadow: '2px 2px 0px var(--shadow-color)',
-                  background: 'var(--bg)',
-                  fontWeight: 600,
-                  fontSize: 13.5,
-                  color: 'var(--ink)'
-                }}
-              />
-            </div>
-
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4, color: 'var(--ink-dim)' }}>
-                Party B (Respondent)
-              </label>
-              <input
-                type="text"
-                value={caseState.partyB}
-                onChange={(e) => setCaseState({ ...caseState, partyB: e.target.value })}
-                style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  border: '2.5px solid var(--border)',
-                  borderRadius: 'var(--radius-md)',
-                  boxShadow: '2px 2px 0px var(--shadow-color)',
-                  background: 'var(--bg)',
-                  fontWeight: 600,
-                  fontSize: 13.5,
-                  color: 'var(--ink)'
-                }}
-              />
-            </div>
-
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4, color: 'var(--ink-dim)' }}>
-                Dispute Scenario
-              </label>
-              <select
-                value={caseState.scenario}
-                onChange={(e) => {
-                  const scKey = e.target.value as 'deposit' | 'freelance' | 'marketplace' | 'custom';
-                  const sc = PRESET_SCENARIOS[scKey as keyof typeof PRESET_SCENARIOS];
-                  setCaseState(prev => ({
-                    ...prev,
-                    scenario: scKey,
-                    title: sc ? sc.title : prev.title,
-                    partyA: sc ? sc.partyA : prev.partyA,
-                    partyB: sc ? sc.partyB : prev.partyB,
-                    settlement: sc ? { ...sc.settlement } : prev.settlement
-                  }));
-                }}
-                style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  border: '2.5px solid var(--border)',
-                  borderRadius: 'var(--radius-md)',
-                  boxShadow: '2px 2px 0px var(--shadow-color)',
-                  background: 'var(--bg)',
-                  fontWeight: 600,
-                  fontSize: 13,
-                  color: 'var(--ink)'
-                }}
-              >
-                <option value="deposit">Housing · Security Deposit Deduction</option>
-                <option value="freelance">Work · Freelance Scope &amp; Invoice</option>
-                <option value="marketplace">Commerce · Order Condition &amp; Refund</option>
-                <option value="custom">Blank · Live Freeform Mediation</option>
-              </select>
-            </div>
-
+            {/* Test Dialogue Runner & Reset */}
             <div style={{ display: 'flex', gap: 8 }}>
               <button
-                className="btn btn--sm btn--yellow"
-                style={{ flex: 1 }}
+                className="btn btn--xs btn--yellow"
+                style={{ flex: 1, padding: '7px 10px' }}
                 onClick={handleLoadScenario}
+                title="Run test dialogue statements for this case"
               >
-                <Play size={13} />
-                <span>Run Dialogue</span>
+                <Play size={12} />
+                <span>Run Dialogue Demo</span>
               </button>
 
               <button
-                className="btn btn--sm btn--ghost"
+                className="btn btn--xs btn--ghost"
                 onClick={handleReset}
-                title="Reset Session"
+                title="Reset Hearing Session"
+                style={{ padding: '7px 10px' }}
               >
-                <RotateCcw size={13} />
+                <RotateCcw size={12} />
               </button>
             </div>
           </div>
