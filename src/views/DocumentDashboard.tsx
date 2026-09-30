@@ -2,9 +2,17 @@ import React, { useState, useEffect } from 'react';
 import { 
   FileText, ShieldCheck, Download, Share2, Plus, ExternalLink, 
   Search, CheckCircle2, Clock, Hash, AlertTriangle, ArrowRight, 
-  Send, RefreshCw, Eye, Copy, Check, Users, Lock, X
+  Send, RefreshCw, Eye, Copy, Check, Users, Lock, X, Trash2, Database
 } from 'lucide-react';
-import { fetchVaultDocuments, deleteVaultDocument, DocumentRecord, getOrCreateRoom } from '../services/supabase';
+import { 
+  fetchVaultDocuments, 
+  deleteVaultDocument, 
+  DocumentRecord, 
+  getOrCreateRoom,
+  recordMyRoomParticipation,
+  fetchDocumentByIdOrRoom,
+  getBrowserClientId
+} from '../services/supabase';
 import { generateSettlementPdf } from '../utils/pdf';
 import { playTactileSound } from '../utils/audio';
 import { CaseSessionState } from '../types';
@@ -24,6 +32,12 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
   const [selectedDoc, setSelectedDoc] = useState<DocumentRecord | null>(null);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
+  const [browserClientId, setBrowserClientId] = useState<string>('');
+
+  // Import Docket by Code state
+  const [importDocketInput, setImportDocketInput] = useState<string>('');
+  const [importStatus, setImportStatus] = useState<{ message: string; isError: boolean } | null>(null);
+  const [isImporting, setIsImporting] = useState<boolean>(false);
 
   // Verification modal state
   const [isVerifyModalOpen, setIsVerifyModalOpen] = useState<boolean>(false);
@@ -52,64 +66,17 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
     setLoading(true);
     try {
       const docs = await fetchVaultDocuments();
-      if (docs.length > 0) {
-        setDocuments(docs);
-      } else {
-        // Fallback demo/initial sample records if Supabase table is pristine
-        const defaultSample: DocumentRecord[] = [
-          {
-            id: 'DOC-8492-SEAL',
-            room_id: 'REF-8492',
-            case_title: 'Security Deposit Return & Painting Deduction Dispute',
-            doc_type: 'conciliated_settlement',
-            record_hash: '9f83a48e71c2b5349e5d41f7e0258163f923b729acde25f442b08fa176c4a938',
-            sealed_at: new Date(Date.now() - 3600000 * 2).toISOString(),
-            status: 'sealed',
-            metadata: {
-              partyA: 'Meera Sharma (Tenant)',
-              partyB: 'Mr. R.K. Khanna (Landlord)',
-              financialAmount: '₹74,000 to be transferred via direct bank deposit',
-              executionDeadline: 'By 7 October 2026',
-              obligationA: 'Hand over flat keys and shared move-out inspection photos',
-              obligationB: 'Return full security deposit minus the agreed ₹6,000 painting deduction',
-              claimsCount: 6,
-              signedA: true,
-              signedB: true
-            },
-            created_at: new Date(Date.now() - 3600000 * 2).toISOString()
-          },
-          {
-            id: 'DOC-7319-SEAL',
-            room_id: 'REF-7319',
-            case_title: 'Freelance Design Milestone Delivery & Copyright Assignment',
-            doc_type: 'commercial_conciliation',
-            record_hash: '3a5b98f21e07d4b689a714c330f8188177df98e6c46a6f11c750b3299c852ef1',
-            sealed_at: new Date(Date.now() - 86400000 * 1).toISOString(),
-            status: 'sealed',
-            metadata: {
-              partyA: 'Arjun Verma (Freelance Designer)',
-              partyB: 'Apex Retail Labs (Client)',
-              financialAmount: '$2,400 final milestone disbursement',
-              executionDeadline: 'Within 48 hours of asset upload',
-              obligationA: 'Deliver Figma source tokens and production exports',
-              obligationB: 'Release escrow payment without scope penalty',
-              claimsCount: 4,
-              signedA: true,
-              signedB: true
-            },
-            created_at: new Date(Date.now() - 86400000 * 1).toISOString()
-          }
-        ];
-        setDocuments(defaultSample);
-      }
+      setDocuments(docs);
     } catch (e) {
       console.error('Error fetching vault documents:', e);
+      setDocuments([]);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    setBrowserClientId(getBrowserClientId());
     loadDocuments();
   }, []);
 
@@ -125,10 +92,50 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
     }
   };
 
+  const handleImportDocket = async (codeToTry?: string) => {
+    const code = (codeToTry || importDocketInput || quickJoinId).trim().toUpperCase();
+    if (!code) {
+      setImportStatus({ message: 'Please enter a valid Docket ID or Room Code.', isError: true });
+      playTactileSound('alert');
+      return;
+    }
+    setImportStatus(null);
+    setIsImporting(true);
+    playTactileSound('click');
+
+    try {
+      const found = await fetchDocumentByIdOrRoom(code);
+      if (found) {
+        playTactileSound('success');
+        setImportDocketInput('');
+        setQuickJoinId('');
+        setImportStatus({ message: `Successfully imported "${found.case_title}" (${found.id}) into your local vault!`, isError: false });
+        await loadDocuments();
+        setTimeout(() => setImportStatus(null), 5000);
+      } else {
+        setImportStatus({ message: `No sealed settlement found for "${code}". If a mediation hearing is still in progress, you can Join by Room Code.`, isError: true });
+        playTactileSound('alert');
+      }
+    } catch (err) {
+      setImportStatus({ message: 'Error querying remote ledger.', isError: true });
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleDeleteDoc = async (docId: string, caseTitle: string) => {
+    if (window.confirm(`Remove "${caseTitle}" from your browser's private vault?`)) {
+      playTactileSound('toggle');
+      await deleteVaultDocument(docId);
+      setDocuments(prev => prev.filter(d => d.id !== docId));
+    }
+  };
+
   const handleCreateRoom = async () => {
     playTactileSound('action');
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const newId = `REF-${randomSuffix}`;
+    recordMyRoomParticipation(newId);
 
     await getOrCreateRoom(newId, {
       title: newRoomTitle,
@@ -262,21 +269,27 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
         borderBottom: 'var(--border-width) solid var(--border)'
       }}>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
             <span className="pill pill--purple mono" style={{ fontSize: 11 }}>
               <ShieldCheck size={14} />
               CASE DOCUMENT VAULT
             </span>
             <span className="pill mono" style={{ fontSize: 11, background: '#ECFDF5', color: '#065F46', borderColor: '#065F46' }}>
               <span className="dot" style={{ background: '#10B981' }}></span>
-              SUPABASE LEDGER SYNCED
+              BROWSER ISOLATED & SYNCED
             </span>
+            {browserClientId && (
+              <span className="pill mono" style={{ fontSize: 10, background: 'var(--surface)', color: 'var(--ink-light)' }} title="This browser's private vault identifier">
+                <Database size={11} style={{ marginRight: 4 }} />
+                {browserClientId}
+              </span>
+            )}
           </div>
           <h1 style={{ fontFamily: 'var(--font-main)', fontSize: 32, fontWeight: 800, margin: 0, letterSpacing: '-0.02em' }}>
             Case Records & Document Management
           </h1>
           <p style={{ margin: '6px 0 0', color: 'var(--ink-light)', fontSize: 15 }}>
-            Tamper-proof repository of conciliation settlements, bilateral certificates, and live dispute rooms.
+            Tamper-proof repository of conciliation settlements. Strictly scoped to mediation hearings you create or participate in.
           </p>
         </div>
 
@@ -358,35 +371,45 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
         <div className="card" style={{ padding: 20, background: 'var(--primary-subtle)', borderColor: 'var(--primary)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-              Join by Room Code
+              Access Docket or Room
             </span>
             <Lock size={18} color="var(--primary)" />
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             <input 
               type="text"
-              placeholder="e.g. REF-8492"
+              placeholder="e.g. REF-2026-1904"
               value={quickJoinId}
-              onChange={(e) => setQuickJoinId(e.target.value)}
+              onChange={(e) => { setQuickJoinId(e.target.value); setImportStatus(null); }}
               className="mono"
               style={{
                 flex: 1,
-                padding: '8px 12px',
+                minWidth: 120,
+                padding: '8px 10px',
                 borderRadius: 'var(--radius-md)',
                 border: '2px solid var(--border)',
                 fontWeight: 700,
-                fontSize: 14,
+                fontSize: 13,
                 textTransform: 'uppercase',
                 background: 'var(--surface)'
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && quickJoinId.trim()) {
-                  onOpenRoom(quickJoinId.trim());
+                  handleImportDocket(quickJoinId.trim());
                 }
               }}
             />
             <button 
               className="btn btn--sm btn--primary"
+              disabled={!quickJoinId.trim() || isImporting}
+              onClick={() => handleImportDocket(quickJoinId.trim())}
+              title="Import sealed agreement into this browser vault"
+            >
+              {isImporting ? <RefreshCw size={13} className="spin" /> : <Download size={13} />}
+              <span>Import</span>
+            </button>
+            <button 
+              className="btn btn--sm btn--secondary"
               disabled={!quickJoinId.trim()}
               onClick={() => {
                 if (quickJoinId.trim()) {
@@ -394,13 +417,27 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
                   onOpenRoom(quickJoinId.trim());
                 }
               }}
+              title="Join live mediation room"
             >
-              Join
+              <ExternalLink size={13} />
+              <span>Join</span>
             </button>
           </div>
-          <div style={{ fontSize: 12, color: 'var(--ink-light)', marginTop: 8 }}>
-            Enter call with both parties in real-time
-          </div>
+          {importStatus ? (
+            <div style={{ 
+              fontSize: 12, 
+              color: importStatus.isError ? '#DC2626' : '#059669', 
+              fontWeight: 600, 
+              marginTop: 8,
+              lineHeight: 1.3 
+            }}>
+              {importStatus.message}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--ink-light)', marginTop: 8 }}>
+              Enter Room Code to enter call, or import sealed settlement into vault
+            </div>
+          )}
         </div>
       </div>
 
@@ -457,20 +494,84 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
         ) : filteredDocs.length === 0 ? (
           <div style={{
             textAlign: 'center',
-            padding: '60px 20px',
+            padding: '48px 24px',
             border: '2px dashed var(--border)',
             borderRadius: 'var(--radius-lg)',
             background: 'var(--surface)'
           }}>
-            <FileText size={40} style={{ margin: '0 auto 12px', color: 'var(--ink-light)', opacity: 0.5 }} />
-            <h3 style={{ margin: '0 0 6px', fontWeight: 800 }}>No Documents Found</h3>
-            <p style={{ margin: '0 0 16px', color: 'var(--ink-light)', fontSize: 14 }}>
-              {searchQuery ? 'Try adjusting your search criteria.' : 'Create a room and complete a mediation session to generate your first sealed record.'}
+            <div style={{
+              width: 56,
+              height: 56,
+              borderRadius: '50%',
+              background: 'var(--primary-subtle)',
+              border: '2px solid var(--border)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto 16px'
+            }}>
+              <ShieldCheck size={28} color="var(--primary)" />
+            </div>
+
+            <h3 style={{ margin: '0 0 8px', fontWeight: 800, fontSize: 18 }}>
+              {searchQuery ? 'No Matching Documents' : 'Your Document Vault is Private & Empty'}
+            </h3>
+
+            <p style={{ margin: '0 auto 20px', color: 'var(--ink-light)', fontSize: 14, maxWidth: 540, lineHeight: 1.5 }}>
+              {searchQuery 
+                ? `No documents in your browser vault matched "${searchQuery}".` 
+                : 'For strict legal privacy, sealed settlement agreements are scoped solely to the parties who participated in that hearing. Documents are remembered in your browser database so other browsers cannot view them.'}
             </p>
-            <button className="btn btn--primary btn--sm" onClick={() => setIsCreateModalOpen(true)}>
-              <Plus size={16} />
-              <span>Create Dispute Room</span>
-            </button>
+
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button className="btn btn--primary btn--sm" onClick={() => setIsCreateModalOpen(true)}>
+                <Plus size={16} />
+                <span>Create Dispute Room</span>
+              </button>
+
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input 
+                  type="text"
+                  placeholder="Enter Docket or Room Code..."
+                  value={importDocketInput}
+                  onChange={(e) => { setImportDocketInput(e.target.value); setImportStatus(null); }}
+                  className="mono"
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 'var(--radius-md)',
+                    border: '1.5px solid var(--border)',
+                    fontSize: 13,
+                    textTransform: 'uppercase',
+                    minWidth: 200,
+                    background: 'var(--bg)'
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && importDocketInput.trim()) {
+                      handleImportDocket(importDocketInput.trim());
+                    }
+                  }}
+                />
+                <button 
+                  className="btn btn--secondary btn--sm"
+                  disabled={!importDocketInput.trim() || isImporting}
+                  onClick={() => handleImportDocket(importDocketInput.trim())}
+                >
+                  {isImporting ? <RefreshCw size={14} className="spin" /> : <Download size={14} />}
+                  <span>Access Docket</span>
+                </button>
+              </div>
+            </div>
+
+            {importStatus && (
+              <div style={{ 
+                marginTop: 16, 
+                fontSize: 13, 
+                fontWeight: 600, 
+                color: importStatus.isError ? '#DC2626' : '#059669' 
+              }}>
+                {importStatus.message}
+              </div>
+            )}
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
@@ -637,14 +738,27 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
                             </button>
                           </div>
 
-                          <button 
-                            className="btn btn--xs btn--ghost" 
-                            style={{ width: '100%', justifyContent: 'center', border: '1px dashed var(--border)' }}
-                            onClick={() => onOpenRoom(doc.room_id)}
-                          >
-                            <ExternalLink size={12} />
-                            <span>Open Room</span>
-                          </button>
+                          <div style={{ display: 'flex', gap: 6, width: '100%' }}>
+                            <button 
+                              className="btn btn--xs btn--ghost" 
+                              style={{ flex: 1, justifyContent: 'center', border: '1px dashed var(--border)' }}
+                              onClick={() => onOpenRoom(doc.room_id)}
+                              title="Enter live mediation room"
+                            >
+                              <ExternalLink size={12} />
+                              <span>Room</span>
+                            </button>
+
+                            <button 
+                              className="btn btn--xs btn--ghost" 
+                              style={{ flex: 1, justifyContent: 'center', color: '#DC2626' }}
+                              onClick={() => handleDeleteDoc(doc.id, doc.case_title)}
+                              title="Remove document from this browser's vault"
+                            >
+                              <Trash2 size={12} />
+                              <span>Remove</span>
+                            </button>
+                          </div>
                         </div>
                       </td>
                     </tr>

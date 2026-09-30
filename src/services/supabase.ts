@@ -236,7 +236,111 @@ export async function fetchTranscriptItems(roomId: string): Promise<TranscriptIt
   }));
 }
 
-// Documents Dashboard CRUD
+// Browser Database & Local Identity Scoping
+const STORAGE_KEY_CLIENT_ID = 'referee_client_id';
+const STORAGE_KEY_MY_ROOMS = 'referee_my_rooms';
+const STORAGE_KEY_MY_DOC_IDS = 'referee_my_doc_ids';
+const STORAGE_KEY_LOCAL_DOCS = 'referee_sealed_docs';
+
+export function getBrowserClientId(): string {
+  try {
+    let clientId = localStorage.getItem(STORAGE_KEY_CLIENT_ID);
+    if (!clientId) {
+      clientId = `CLIENT-${Math.random().toString(36).substring(2, 8).toUpperCase()}-${Date.now().toString(36).toUpperCase()}`;
+      localStorage.setItem(STORAGE_KEY_CLIENT_ID, clientId);
+    }
+    return clientId;
+  } catch {
+    return 'CLIENT-ANON-LOCAL';
+  }
+}
+
+export function getMyParticipatedRooms(): string[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_MY_ROOMS);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export function recordMyRoomParticipation(roomId: string): void {
+  if (!roomId) return;
+  const cleanId = roomId.trim().toUpperCase();
+  try {
+    const rooms = getMyParticipatedRooms();
+    if (!rooms.includes(cleanId)) {
+      rooms.push(cleanId);
+      localStorage.setItem(STORAGE_KEY_MY_ROOMS, JSON.stringify(rooms));
+    }
+  } catch (e) {
+    console.warn('Failed to record room participation in browser database:', e);
+  }
+}
+
+export function getMyVaultDocumentIds(): string[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_MY_DOC_IDS);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export function recordMyVaultDocument(doc: DocumentRecord): void {
+  try {
+    // 1. Record doc ID in user's vault
+    const docIds = getMyVaultDocumentIds();
+    if (!docIds.includes(doc.id)) {
+      docIds.push(doc.id);
+      localStorage.setItem(STORAGE_KEY_MY_DOC_IDS, JSON.stringify(docIds));
+    }
+    // 2. Record participating room ID
+    if (doc.room_id) {
+      recordMyRoomParticipation(doc.room_id);
+    }
+    // 3. Cache document object in browser database
+    const rawCache = localStorage.getItem(STORAGE_KEY_LOCAL_DOCS);
+    const cache: Record<string, DocumentRecord> = rawCache ? JSON.parse(rawCache) : {};
+    cache[doc.id] = doc;
+    localStorage.setItem(STORAGE_KEY_LOCAL_DOCS, JSON.stringify(cache));
+  } catch (e) {
+    console.warn('Failed to save document in browser database:', e);
+  }
+}
+
+export function getLocalVaultDocuments(): DocumentRecord[] {
+  try {
+    const rawCache = localStorage.getItem(STORAGE_KEY_LOCAL_DOCS);
+    if (!rawCache) return [];
+    const cache: Record<string, DocumentRecord> = JSON.parse(rawCache);
+    return Object.values(cache);
+  } catch {
+    return [];
+  }
+}
+
+export function removeLocalVaultDocument(docId: string): void {
+  try {
+    const docIds = getMyVaultDocumentIds().filter(id => id !== docId);
+    localStorage.setItem(STORAGE_KEY_MY_DOC_IDS, JSON.stringify(docIds));
+
+    const rawCache = localStorage.getItem(STORAGE_KEY_LOCAL_DOCS);
+    if (rawCache) {
+      const cache: Record<string, DocumentRecord> = JSON.parse(rawCache);
+      delete cache[docId];
+      localStorage.setItem(STORAGE_KEY_LOCAL_DOCS, JSON.stringify(cache));
+    }
+  } catch (e) {
+    console.warn('Failed to remove document from browser storage:', e);
+  }
+}
+
+// Documents Dashboard CRUD (Scoped to Browser & Participated Sessions)
 export async function saveDocumentToVault(doc: {
   id: string;
   roomId: string;
@@ -245,8 +349,15 @@ export async function saveDocumentToVault(doc: {
   recordHash: string;
   sealedAt: string;
   metadata?: any;
-}): Promise<void> {
-  await supabase.from('referee_documents').upsert([{
+}): Promise<DocumentRecord> {
+  const clientId = getBrowserClientId();
+  const enrichedMetadata = {
+    ...(doc.metadata || {}),
+    creatorClientId: clientId,
+    browserStoredAt: new Date().toISOString()
+  };
+
+  const docRecord: DocumentRecord = {
     id: doc.id,
     room_id: doc.roomId,
     case_title: doc.caseTitle,
@@ -254,32 +365,167 @@ export async function saveDocumentToVault(doc: {
     record_hash: doc.recordHash,
     sealed_at: doc.sealedAt,
     status: 'sealed',
-    metadata: doc.metadata || {}
-  }]);
+    metadata: enrichedMetadata,
+    created_at: new Date().toISOString()
+  };
+
+  // 1. Save immediately in browser database (offline-ready, instant isolation)
+  recordMyVaultDocument(docRecord);
+
+  // 2. Persist to Supabase ledger
+  try {
+    await supabase.from('referee_documents').upsert([{
+      id: doc.id,
+      room_id: doc.roomId,
+      case_title: doc.caseTitle,
+      doc_type: doc.docType,
+      record_hash: doc.recordHash,
+      sealed_at: doc.sealedAt,
+      status: 'sealed',
+      metadata: enrichedMetadata
+    }]);
+  } catch (err) {
+    console.warn('Supabase document vault sync warning (retained in browser database):', err);
+  }
+
+  return docRecord;
 }
 
 export async function fetchVaultDocuments(): Promise<DocumentRecord[]> {
-  const { data, error } = await supabase
-    .from('referee_documents')
-    .select('*')
-    .order('created_at', { ascending: false });
+  const myRooms = getMyParticipatedRooms();
+  const myDocIds = getMyVaultDocumentIds();
+  const localDocs = getLocalVaultDocuments();
 
-  if (error || !data) return [];
-  return data.map(d => ({
-    id: d.id,
-    room_id: d.room_id,
-    case_title: d.case_title,
-    doc_type: d.doc_type,
-    record_hash: d.record_hash,
-    sealed_at: d.sealed_at,
-    status: d.status,
-    metadata: d.metadata,
-    created_at: d.created_at
-  }));
+  // Strict Browser Isolation:
+  // If this browser has never created or joined any hearing rooms and has no saved document IDs,
+  // return an empty array. Do NOT leak other users' sealed legal settlements!
+  if (myRooms.length === 0 && myDocIds.length === 0) {
+    return [];
+  }
+
+  const docMap = new Map<string, DocumentRecord>();
+
+  // Load from local browser database first
+  for (const doc of localDocs) {
+    if (myDocIds.includes(doc.id) || (doc.room_id && myRooms.includes(doc.room_id))) {
+      docMap.set(doc.id, doc);
+    }
+  }
+
+  // Fetch scoped remote records from Supabase only for rooms or documents this browser is authorized for
+  try {
+    const queries: Promise<any>[] = [];
+
+    if (myRooms.length > 0) {
+      queries.push(
+        Promise.resolve(
+          supabase
+            .from('referee_documents')
+            .select('*')
+            .in('room_id', myRooms)
+        )
+      );
+    }
+
+    if (myDocIds.length > 0) {
+      queries.push(
+        Promise.resolve(
+          supabase
+            .from('referee_documents')
+            .select('*')
+            .in('id', myDocIds)
+        )
+      );
+    }
+
+    const responses = await Promise.all(queries);
+
+    for (const res of responses) {
+      if (!res.error && res.data) {
+        for (const d of res.data) {
+          const docRecord: DocumentRecord = {
+            id: d.id,
+            room_id: d.room_id,
+            case_title: d.case_title,
+            doc_type: d.doc_type,
+            record_hash: d.record_hash,
+            sealed_at: d.sealed_at,
+            status: d.status,
+            metadata: d.metadata,
+            created_at: d.created_at
+          };
+          docMap.set(docRecord.id, docRecord);
+          // Sync fresh copy to browser database
+          recordMyVaultDocument(docRecord);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Supabase fetchVaultDocuments network exception (serving from browser database):', err);
+  }
+
+  return Array.from(docMap.values()).sort((a, b) => {
+    const timeA = new Date(a.sealed_at || a.created_at).getTime();
+    const timeB = new Date(b.sealed_at || b.created_at).getTime();
+    return timeB - timeA;
+  });
+}
+
+// Fetch a single document by Room Code or Docket ID to explicitly import into this browser's vault
+export async function fetchDocumentByIdOrRoom(identifier: string): Promise<DocumentRecord | null> {
+  const clean = identifier.trim().toUpperCase();
+  if (!clean) return null;
+
+  try {
+    // Check local database first
+    const localDocs = getLocalVaultDocuments();
+    const localMatch = localDocs.find(d => d.id.toUpperCase() === clean || d.room_id.toUpperCase() === clean);
+    if (localMatch) {
+      recordMyVaultDocument(localMatch);
+      return localMatch;
+    }
+
+    // Query Supabase for matching record
+    const { data, error } = await supabase
+      .from('referee_documents')
+      .select('*')
+      .or(`id.eq.${clean},room_id.eq.${clean}`)
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) return null;
+
+    const docRecord: DocumentRecord = {
+      id: data.id,
+      room_id: data.room_id,
+      case_title: data.case_title,
+      doc_type: data.doc_type,
+      record_hash: data.record_hash,
+      sealed_at: data.sealed_at,
+      status: data.status,
+      metadata: data.metadata,
+      created_at: data.created_at
+    };
+
+    // Store into this browser's database
+    recordMyVaultDocument(docRecord);
+    return docRecord;
+  } catch (e) {
+    console.warn('Error fetching document by ID or Room:', e);
+    return null;
+  }
 }
 
 export async function deleteVaultDocument(id: string): Promise<void> {
-  await supabase.from('referee_documents').delete().eq('id', id);
+  // 1. Remove from local browser database
+  removeLocalVaultDocument(id);
+
+  // 2. Delete from Supabase
+  try {
+    await supabase.from('referee_documents').delete().eq('id', id);
+  } catch (e) {
+    console.warn('Error deleting document from Supabase:', e);
+  }
 }
 
 // Realtime Room Channel for Sync & WebRTC Peer Signaling

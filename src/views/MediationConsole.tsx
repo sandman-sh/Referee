@@ -67,7 +67,8 @@ import {
   insertEvidenceClaim,
   insertTranscriptItem,
   saveDocumentToVault,
-  subscribeToRealtimeRoom
+  subscribeToRealtimeRoom,
+  recordMyRoomParticipation
 } from '../services/supabase';
 import {
   extractCommitment,
@@ -306,6 +307,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
       console.warn('Supabase room create exception (running local state):', err);
     }
 
+    recordMyRoomParticipation(newRoomId);
     setIsRoomActive(true);
     playTactileSound('success');
   };
@@ -322,6 +324,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
 
     try {
       const code = joinRoomCode.trim().toUpperCase();
+      recordMyRoomParticipation(code);
       const { state: remoteState } = await getOrCreateRoom(code, {
         id: code,
         title: 'Mediation Hearing',
@@ -544,6 +547,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
   useEffect(() => {
     if (!isRoomActive) return;
     const currentRoomId = caseState.id;
+    recordMyRoomParticipation(currentRoomId);
     let isMounted = true;
 
     // Load or create room in Supabase

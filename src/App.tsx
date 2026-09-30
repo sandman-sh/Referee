@@ -6,6 +6,7 @@ import { DocumentDashboard } from './views/DocumentDashboard';
 import { SettingsModal } from './components/SettingsModal';
 import { playTactileSound } from './utils/audio';
 import { SpeakerRole } from './types';
+import { recordMyRoomParticipation } from './services/supabase';
 
 export const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<'home' | 'console' | 'dashboard'>('home');
@@ -21,6 +22,7 @@ export const App: React.FC = () => {
     const roleParam = params.get('role') as SpeakerRole | null;
 
     if (roomParam) {
+      recordMyRoomParticipation(roomParam);
       setActiveRoomId(roomParam);
       if (roleParam && ['a', 'b', 'ref'].includes(roleParam)) {
         setActiveRole(roleParam);
@@ -60,6 +62,7 @@ export const App: React.FC = () => {
   };
 
   const handleOpenRoomFromDashboard = (roomId: string, role?: SpeakerRole) => {
+    recordMyRoomParticipation(roomId);
     setActiveRoomId(roomId);
     if (role) setActiveRole(role);
     setCurrentView('console');
