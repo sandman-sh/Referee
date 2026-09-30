@@ -391,6 +391,16 @@ export async function saveDocumentToVault(doc: {
   return docRecord;
 }
 
+export function clearAllLocalVault(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY_MY_DOC_IDS);
+    localStorage.removeItem(STORAGE_KEY_MY_ROOMS);
+    localStorage.removeItem(STORAGE_KEY_LOCAL_DOCS);
+  } catch (e) {
+    console.warn('Failed to clear local vault:', e);
+  }
+}
+
 export async function fetchVaultDocuments(): Promise<DocumentRecord[]> {
   const myRooms = getMyParticipatedRooms();
   const myDocIds = getMyVaultDocumentIds();
@@ -404,13 +414,6 @@ export async function fetchVaultDocuments(): Promise<DocumentRecord[]> {
   }
 
   const docMap = new Map<string, DocumentRecord>();
-
-  // Load from local browser database first
-  for (const doc of localDocs) {
-    if (myDocIds.includes(doc.id) || (doc.room_id && myRooms.includes(doc.room_id))) {
-      docMap.set(doc.id, doc);
-    }
-  }
 
   // Fetch scoped remote records from Supabase only for rooms or documents this browser is authorized for
   try {
@@ -439,6 +442,7 @@ export async function fetchVaultDocuments(): Promise<DocumentRecord[]> {
     }
 
     const responses = await Promise.all(queries);
+    const remoteDocs = new Map<string, DocumentRecord>();
 
     for (const res of responses) {
       if (!res.error && res.data) {
@@ -454,14 +458,40 @@ export async function fetchVaultDocuments(): Promise<DocumentRecord[]> {
             metadata: d.metadata,
             created_at: d.created_at
           };
-          docMap.set(docRecord.id, docRecord);
-          // Sync fresh copy to browser database
-          recordMyVaultDocument(docRecord);
+          remoteDocs.set(docRecord.id, docRecord);
         }
       }
     }
+
+    // Authoritative Sync:
+    // If Supabase queries succeeded, sync authoritatively so deleted previous test records are purged
+    if (responses.length > 0 && responses.every(r => !r.error)) {
+      const validCache: Record<string, DocumentRecord> = {};
+      const validDocIds: string[] = [];
+
+      for (const [id, doc] of remoteDocs.entries()) {
+        validCache[id] = doc;
+        validDocIds.push(id);
+      }
+
+      localStorage.setItem(STORAGE_KEY_LOCAL_DOCS, JSON.stringify(validCache));
+      localStorage.setItem(STORAGE_KEY_MY_DOC_IDS, JSON.stringify(validDocIds));
+
+      return Array.from(remoteDocs.values()).sort((a, b) => {
+        const timeA = new Date(a.sealed_at || a.created_at).getTime();
+        const timeB = new Date(b.sealed_at || b.created_at).getTime();
+        return timeB - timeA;
+      });
+    }
   } catch (err) {
-    console.warn('Supabase fetchVaultDocuments network exception (serving from browser database):', err);
+    console.warn('Supabase fetchVaultDocuments network exception (serving from local cache):', err);
+  }
+
+  // Fallback to local cache if network/Supabase was unreachable
+  for (const doc of localDocs) {
+    if (myDocIds.includes(doc.id) || (doc.room_id && myRooms.includes(doc.room_id))) {
+      docMap.set(doc.id, doc);
+    }
   }
 
   return Array.from(docMap.values()).sort((a, b) => {

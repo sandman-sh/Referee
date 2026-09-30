@@ -11,7 +11,8 @@ import {
   getOrCreateRoom,
   recordMyRoomParticipation,
   fetchDocumentByIdOrRoom,
-  getBrowserClientId
+  getBrowserClientId,
+  clearAllLocalVault
 } from '../services/supabase';
 import { generateSettlementPdf } from '../utils/pdf';
 import { playTactileSound } from '../utils/audio';
@@ -128,6 +129,15 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
       playTactileSound('toggle');
       await deleteVaultDocument(docId);
       setDocuments(prev => prev.filter(d => d.id !== docId));
+    }
+  };
+
+  const handleResetVaultCache = () => {
+    if (window.confirm('Reset this browser\'s local vault cache? This will clear all locally remembered records from this browser.')) {
+      clearAllLocalVault();
+      setDocuments([]);
+      playTactileSound('toggle');
+      loadDocuments();
     }
   };
 
@@ -480,6 +490,15 @@ export const DocumentDashboard: React.FC<DocumentDashboardProps> = ({
             >
               <RefreshCw size={16} className={loading ? 'spin' : ''} />
               <span>Refresh Vault</span>
+            </button>
+            <button 
+              className="btn btn--sm btn--ghost" 
+              onClick={handleResetVaultCache}
+              title="Clear all obsolete local test records and reset vault"
+              style={{ color: '#DC2626' }}
+            >
+              <Trash2 size={15} />
+              <span>Reset Cache</span>
             </button>
           </div>
         </div>

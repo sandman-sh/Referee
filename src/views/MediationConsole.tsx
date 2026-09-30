@@ -68,7 +68,8 @@ import {
   insertTranscriptItem,
   saveDocumentToVault,
   subscribeToRealtimeRoom,
-  recordMyRoomParticipation
+  recordMyRoomParticipation,
+  recordMyVaultDocument
 } from '../services/supabase';
 import {
   extractCommitment,
@@ -537,6 +538,24 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
         setIsPeerAudioConnected(true);
       } else if (signal.type === 'candidate' && signal.candidate) {
         await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+      } else if (signal.type === 'SEAL_RECORD') {
+        setCaseState(prev => {
+          if (!prev.isSealed) {
+            try {
+              confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
+            } catch {}
+            playTactileSound('stamp');
+            setActiveTab('certificate');
+            addAuditLog(`Case sealed by Referee Mediator (Hash: ${signal.recordHash?.slice(0, 10)}...)`, 'seal');
+          }
+          return {
+            ...prev,
+            isSealed: true,
+            sealedTimestamp: signal.sealedTimestamp,
+            recordHash: signal.recordHash,
+            currentPhase: 4
+          };
+        });
       }
     } catch (e) {
       console.warn('WebRTC signal processing exception:', e);
@@ -570,20 +589,55 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
     // Subscribe to real-time events & broadcasts
     const { unsubscribe, broadcastSignal } = subscribeToRealtimeRoom(currentRoomId, {
       onRoomUpdate: (row) => {
-        setCaseState(prev => ({
-          ...prev,
-          title: row.title || prev.title,
-          partyA: row.party_a || prev.partyA,
-          partyB: row.party_b || prev.partyB,
-          currentPhase: (row.current_phase as any) || prev.currentPhase,
-          disagreementIndex: row.disagreement_index ?? prev.disagreementIndex,
-          settlement: row.settlement || prev.settlement,
-          signedA: row.signed_a ?? prev.signedA,
-          signedB: row.signed_b ?? prev.signedB,
-          isSealed: row.is_sealed ?? prev.isSealed,
-          sealedTimestamp: row.sealed_timestamp || prev.sealedTimestamp,
-          recordHash: row.record_hash || prev.recordHash
-        }));
+        setCaseState(prev => {
+          const wasSealed = prev.isSealed;
+          const isNewlySealed = !wasSealed && !!row.is_sealed;
+          if (isNewlySealed) {
+            try {
+              confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
+            } catch {}
+            playTactileSound('stamp');
+            setActiveTab('certificate');
+            addAuditLog(`Case sealed by Referee Mediator (Hash: ${row.record_hash?.slice(0, 10)}...)`, 'seal');
+
+            // Cache into browser vault for all participating parties
+            recordMyVaultDocument({
+              id: `DOC-${currentRoomId.replace('REF-', '')}-SEAL`,
+              room_id: currentRoomId,
+              case_title: row.title || prev.title,
+              doc_type: 'conciliated_settlement',
+              record_hash: row.record_hash || '',
+              sealed_at: row.sealed_timestamp || new Date().toISOString(),
+              status: 'sealed',
+              metadata: {
+                partyA: row.party_a || prev.partyA,
+                partyB: row.party_b || prev.partyB,
+                financialAmount: row.settlement?.financialAmount || prev.settlement?.financialAmount,
+                executionDeadline: row.settlement?.executionDeadline || prev.settlement?.executionDeadline,
+                obligationA: row.settlement?.obligationA || prev.settlement?.obligationA,
+                obligationB: row.settlement?.obligationB || prev.settlement?.obligationB,
+                claimsCount: prev.pinnedClaims.length,
+                signedA: true,
+                signedB: true
+              },
+              created_at: new Date().toISOString()
+            });
+          }
+          return {
+            ...prev,
+            title: row.title || prev.title,
+            partyA: row.party_a || prev.partyA,
+            partyB: row.party_b || prev.partyB,
+            currentPhase: (row.current_phase as any) || prev.currentPhase,
+            disagreementIndex: row.disagreement_index ?? prev.disagreementIndex,
+            settlement: row.settlement || prev.settlement,
+            signedA: row.signed_a ?? prev.signedA,
+            signedB: row.signed_b ?? prev.signedB,
+            isSealed: row.is_sealed ?? prev.isSealed,
+            sealedTimestamp: row.sealed_timestamp || prev.sealedTimestamp,
+            recordHash: row.record_hash || prev.recordHash
+          };
+        });
       },
       onNewClaim: (claim) => {
         setCaseState(prev => {
@@ -1060,16 +1114,30 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
     addAuditLog(`Settlement memorandum signed by ${signer}.`, 'signature');
   };
 
-  // Seal Record with Cryptographic SHA-256
+  // Seal Record with Cryptographic SHA-256 (Referee Mediator Exclusive)
   const handleSealRecord = async () => {
-    if (!caseState.signedA || !caseState.signedB) return;
+    // 1. Role verification: Only Referee mediator can execute the seal in room sessions
+    if (isRoomActive && localUserRole !== 'ref') {
+      alert('Permission Denied: Only the certified Referee Mediator is authorized to execute the final cryptographic settlement seal.');
+      playTactileSound('alert');
+      addAuditLog('Seal blocked: Only the certified Referee Mediator can seal this case.', 'system');
+      return;
+    }
+
+    // 2. Dual signature verification: Both parties must sign before Referee can seal
+    if (!caseState.signedA || !caseState.signedB) {
+      alert('Precondition Required: Both Party A and Party B must execute their digital signatures before the Referee can execute the final seal.');
+      playTactileSound('alert');
+      addAuditLog('Seal blocked: Both Party A and Party B must execute digital signatures first.', 'system');
+      return;
+    }
 
     playTactileSound('stamp');
 
     try {
       confetti({
-        particleCount: 100,
-        spread: 70,
+        particleCount: 120,
+        spread: 80,
         origin: { y: 0.6 }
       });
     } catch {}
@@ -1104,8 +1172,10 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
       currentPhase: 4
     }).catch(e => console.warn('Supabase room seal error:', e));
 
+    const docId = `DOC-${caseState.id.replace('REF-', '')}-SEAL`;
+
     saveDocumentToVault({
-      id: `DOC-${caseState.id.replace('REF-', '')}-SEAL`,
+      id: docId,
       roomId: caseState.id,
       caseTitle: caseState.title,
       docType: 'conciliated_settlement',
@@ -1124,7 +1194,15 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
       }
     }).catch(e => console.warn('Supabase document vault save error:', e));
 
-    addAuditLog(`Case sealed with SHA-256 hash ${hash.slice(0, 10)}... (Vault Synced)`, 'seal');
+    // Broadcast real-time seal signal to Party A and Party B
+    realtimeChannelRef.current?.broadcastSignal({
+      type: 'SEAL_RECORD',
+      sealedTimestamp: timestamp,
+      recordHash: hash,
+      docId: docId
+    });
+
+    addAuditLog(`Case sealed by Referee with SHA-256 hash ${hash.slice(0, 10)}... (Vault Synced)`, 'seal');
     setActiveTab('certificate');
   };
 
@@ -2894,17 +2972,71 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
                 </div>
 
                 <div style={{ textAlign: 'center', marginTop: 28 }}>
-                  <button
-                    className="btn btn--green btn--lg"
-                    disabled={!caseState.signedA || !caseState.signedB}
-                    onClick={handleSealRecord}
-                  >
-                    <Shield size={18} />
-                    <span>Seal Cryptographic Record</span>
-                  </button>
-                  <p style={{ fontSize: 11.5, color: 'var(--ink-dim)', marginTop: 6 }}>
-                    {caseState.signedA && caseState.signedB ? 'Both parties have signed! Ready to seal.' : 'Requires signatures from both parties to generate the sealed receipt.'}
-                  </p>
+                  {(!isRoomActive || localUserRole === 'ref') ? (
+                    // Referee Mediator View: Active when both signed, disabled with exact pending party otherwise
+                    <div>
+                      <button
+                        className={`btn btn--lg ${caseState.signedA && caseState.signedB ? 'btn--green pulse-subtle' : 'btn--secondary'}`}
+                        disabled={!caseState.signedA || !caseState.signedB}
+                        onClick={handleSealRecord}
+                        style={{
+                          minWidth: 320,
+                          padding: '14px 28px',
+                          fontSize: 16,
+                          fontWeight: 800,
+                          boxShadow: caseState.signedA && caseState.signedB ? '0 0 20px rgba(16, 185, 129, 0.4)' : 'none'
+                        }}
+                      >
+                        <Shield size={20} />
+                        <span>
+                          {caseState.signedA && caseState.signedB
+                            ? '⚖️ Execute Official Seal (Referee Mediator)'
+                            : !caseState.signedA && !caseState.signedB
+                            ? 'Awaiting Signatures from Party A & B'
+                            : !caseState.signedA
+                            ? 'Awaiting Party A Signature ✍️'
+                            : 'Awaiting Party B Signature ✍️'}
+                        </span>
+                      </button>
+                      <p style={{ fontSize: 12, color: 'var(--ink-dim)', marginTop: 8 }}>
+                        {caseState.signedA && caseState.signedB
+                          ? '✓ Dual signatures ratified in real time! You are authorized as Referee to execute the immutable seal.'
+                          : 'As the certified Referee Mediator, you will execute the final cryptographic seal once both parties have digitally signed.'}
+                      </p>
+                    </div>
+                  ) : (
+                    // Party A & Party B View: Read-only status; only Referee can seal
+                    <div>
+                      <button
+                        className="btn btn--lg btn--secondary"
+                        disabled={true}
+                        style={{
+                          minWidth: 320,
+                          padding: '14px 28px',
+                          fontSize: 15,
+                          fontWeight: 700,
+                          opacity: 0.85,
+                          cursor: 'not-allowed'
+                        }}
+                      >
+                        <Lock size={18} />
+                        <span>
+                          {caseState.signedA && caseState.signedB
+                            ? '✓ Dual Signatures Ratified — Awaiting Referee Seal ⚖️'
+                            : !caseState.signedA && !caseState.signedB
+                            ? 'Awaiting Dual Signatures (Party A & B)'
+                            : !caseState.signedA
+                            ? 'Awaiting Party A Signature ✍️'
+                            : 'Awaiting Party B Signature ✍️'}
+                        </span>
+                      </button>
+                      <p style={{ fontSize: 12, color: 'var(--ink-dim)', marginTop: 8 }}>
+                        {caseState.signedA && caseState.signedB
+                          ? 'Both parties have executed digital signatures! The Referee Mediator has been notified to execute the final cryptographic seal.'
+                          : 'Only the certified Referee Mediator is authorized to execute the official seal once both parties have signed.'}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
