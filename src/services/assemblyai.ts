@@ -1,4 +1,4 @@
-// Real-Time Speech Streaming & File Transcription Engine: AssemblyAI + Web Speech Fallback
+// Real-Time Speech Streaming & File Transcription Engine: AssemblyAI Secure Backend + Web Speech Fallback
 
 export interface SpeechEventCallbacks {
   onPartialTranscript: (text: string) => void;
@@ -22,12 +22,21 @@ export interface TranscriptionResult {
   chapters?: Array<{ summary: string; headline: string; start: number; end: number }>;
 }
 
+// Check for optional client custom BYOK override in localStorage
 export function getAssemblyAiApiKey(): string {
   const local = localStorage.getItem('assemblyai_api_key_referee');
   if (local && local.trim()) return local.trim();
-  const envKey = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_ASSEMBLYAI_API_KEY;
-  if (envKey && envKey.trim()) return envKey.trim();
   return '';
+}
+
+export async function checkAssemblyAiEngineStatus(): Promise<{ configured: boolean; provider: string; hasServerKey: boolean }> {
+  try {
+    const res = await fetch('/api/assemblyai?action=status');
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch {}
+  return { configured: false, provider: 'Web Speech Fallback', hasServerKey: false };
 }
 
 export class StreamingSpeechService {
@@ -39,7 +48,7 @@ export class StreamingSpeechService {
   private isRunning = false;
 
   async startStreaming(
-    apiKey: string | null,
+    customApiKey: string | null,
     callbacks: SpeechEventCallbacks,
     deviceId?: string
   ): Promise<MediaStream> {
@@ -62,19 +71,14 @@ export class StreamingSpeechService {
       });
       this.mediaStream = stream;
 
-      const effectiveKey = apiKey && apiKey.trim() ? apiKey.trim() : getAssemblyAiApiKey();
+      const effectiveKey = (customApiKey && customApiKey.trim()) ? customApiKey.trim() : getAssemblyAiApiKey();
 
-      if (effectiveKey) {
-        try {
-          await this.connectAssemblyAI(effectiveKey, stream, callbacks);
-          return stream;
-        } catch (assemblyError) {
-          console.warn('AssemblyAI connection failed, falling back to Web Speech:', assemblyError);
-          callbacks.onError('AssemblyAI streaming token error. Activated high-fidelity browser speech engine.');
-          this.connectWebSpeech(callbacks);
-          return stream;
-        }
-      } else {
+      try {
+        await this.connectAssemblyAI(effectiveKey, stream, callbacks);
+        return stream;
+      } catch (assemblyError) {
+        console.warn('AssemblyAI streaming failed, switching to native browser Web Speech:', assemblyError);
+        callbacks.onError('AssemblyAI streaming interrupted. Activated high-fidelity browser speech engine.');
         this.connectWebSpeech(callbacks);
         return stream;
       }
@@ -88,23 +92,32 @@ export class StreamingSpeechService {
   }
 
   private async connectAssemblyAI(
-    apiKey: string,
+    customApiKey: string,
     stream: MediaStream,
     callbacks: SpeechEventCallbacks
   ): Promise<void> {
-    // 1. Fetch temporary token from AssemblyAI v3 streaming endpoint
-    const tokenRes = await fetch('https://streaming.assemblyai.com/v3/token?expires_in_seconds=60', {
+    // Fetch short-lived streaming token from secure backend (keeps secret key off client)
+    const headers: Record<string, string> = {};
+    if (customApiKey) {
+      headers['x-assemblyai-key'] = customApiKey;
+    }
+
+    const tokenRes = await fetch('/api/assemblyai?action=token', {
       method: 'GET',
-      headers: {
-        'Authorization': apiKey
-      }
+      headers
     });
 
     if (!tokenRes.ok) {
-      throw new Error(`AssemblyAI token fetch failed: HTTP ${tokenRes.status}`);
+      const errData = await tokenRes.json().catch(() => ({}));
+      throw new Error(`AssemblyAI token exchange failed: HTTP ${tokenRes.status} (${errData.error || 'Server error'})`);
     }
 
     const { token } = await tokenRes.json();
+    if (!token) {
+      throw new Error('No streaming token returned from server proxy');
+    }
+
+    // Connect WebSocket directly to AssemblyAI streaming v3 with the short-lived token
     const wsUrl = `wss://streaming.assemblyai.com/v3/ws?token=${encodeURIComponent(token)}&sample_rate=16000`;
     const ws = new WebSocket(wsUrl);
     this.socket = ws;
@@ -248,40 +261,40 @@ export class StreamingSpeechService {
 
 export const speechService = new StreamingSpeechService();
 
-// Pre-recorded Audio File Transcription via AssemblyAI REST API
+// Pre-recorded Audio File Transcription via Secure Backend Proxy
 export async function uploadAndTranscribeAudio(
   file: File,
-  apiKey: string,
+  customApiKey?: string,
   onProgress?: (message: string) => void
 ): Promise<TranscriptionResult> {
-  const effectiveKey = apiKey.trim() || getAssemblyAiApiKey();
-  if (!effectiveKey) {
-    throw new Error('AssemblyAI API Key required for deep audio file processing. Please configure in settings or .env.');
+  const effectiveKey = (customApiKey && customApiKey.trim()) ? customApiKey.trim() : getAssemblyAiApiKey();
+  const headers: Record<string, string> = {};
+  if (effectiveKey) {
+    headers['x-assemblyai-key'] = effectiveKey;
   }
 
-  onProgress?.('Uploading audio file to AssemblyAI secure storage...');
+  onProgress?.('Uploading audio file to secure transcription storage...');
 
-  // Step 1: Upload audio file
-  const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
+  // Step 1: Upload audio file via backend proxy
+  const uploadRes = await fetch('/api/assemblyai?action=upload', {
     method: 'POST',
-    headers: {
-      'Authorization': effectiveKey
-    },
+    headers,
     body: file
   });
 
   if (!uploadRes.ok) {
-    throw new Error(`AssemblyAI upload failed: HTTP ${uploadRes.status}`);
+    const err = await uploadRes.json().catch(() => ({}));
+    throw new Error(`Audio upload failed: HTTP ${uploadRes.status} (${err.error || 'Server upload error'})`);
   }
 
   const { upload_url } = await uploadRes.json();
   onProgress?.('Audio uploaded. Requesting multi-speaker diarization...');
 
   // Step 2: Request transcription with speaker diarization & sentiment
-  const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
+  const transcriptRes = await fetch('/api/assemblyai?action=transcript', {
     method: 'POST',
     headers: {
-      'Authorization': effectiveKey,
+      ...headers,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -293,7 +306,8 @@ export async function uploadAndTranscribeAudio(
   });
 
   if (!transcriptRes.ok) {
-    throw new Error(`AssemblyAI transcription dispatch failed: HTTP ${transcriptRes.status}`);
+    const err = await transcriptRes.json().catch(() => ({}));
+    throw new Error(`Transcription dispatch failed: HTTP ${transcriptRes.status} (${err.error || 'Error'})`);
   }
 
   const { id: transcriptId } = await transcriptRes.json();
@@ -306,8 +320,8 @@ export async function uploadAndTranscribeAudio(
     await new Promise(res => setTimeout(res, 2000));
     attempts++;
 
-    const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
-      headers: { 'Authorization': effectiveKey }
+    const pollRes = await fetch(`/api/assemblyai?action=transcript&id=${transcriptId}`, {
+      headers
     });
 
     if (!pollRes.ok) continue;
@@ -343,16 +357,19 @@ export async function uploadAndTranscribeAudio(
   throw new Error('Transcription timed out. Please try again with a shorter audio segment.');
 }
 
-// Generate impartial AI consensus proposal using AssemblyAI LeMUR
+// Generate impartial AI consensus proposal using AssemblyAI LeMUR via Secure Backend Proxy
 export async function generateLeMurMediation(
-  apiKey: string,
+  customApiKey: string | undefined,
   transcript: string,
   partyA: string,
   partyB: string
 ): Promise<string> {
-  const effectiveKey = apiKey.trim() || getAssemblyAiApiKey();
-  if (!effectiveKey) {
-    throw new Error('AssemblyAI API Key required to run LeMUR reasoning model.');
+  const effectiveKey = (customApiKey && customApiKey.trim()) ? customApiKey.trim() : getAssemblyAiApiKey();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
+  };
+  if (effectiveKey) {
+    headers['x-assemblyai-key'] = effectiveKey;
   }
 
   const prompt = `You are Referee, an impartial neutral dispute mediator. 
@@ -368,12 +385,9 @@ Include:
 Keep the tone firm, impartial, and concise.`;
 
   try {
-    const res = await fetch('https://api.assemblyai.com/v2/lemur/v3/generate/task', {
+    const res = await fetch('/api/assemblyai?action=lemur', {
       method: 'POST',
-      headers: {
-        'Authorization': effectiveKey,
-        'Content-Type': 'application/json'
-      },
+      headers,
       body: JSON.stringify({
         prompt,
         final_model: 'anthropic/claude-3-5-sonnet',
@@ -382,7 +396,8 @@ Keep the tone firm, impartial, and concise.`;
     });
 
     if (!res.ok) {
-      throw new Error(`LeMUR request failed: HTTP ${res.status}`);
+      const err = await res.json().catch(() => ({}));
+      throw new Error(`LeMUR request failed: HTTP ${res.status} (${err.error || 'Server error'})`);
     }
 
     const data = await res.json();

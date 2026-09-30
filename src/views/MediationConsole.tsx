@@ -9,6 +9,8 @@ import {
   RotateCcw,
   CheckCircle,
   Shield,
+  ShieldCheck,
+  Lock,
   FileText,
   Copy,
   Download,
@@ -206,8 +208,22 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
     if (initialRoomId) {
       setJoinRoomCode(initialRoomId);
       setIsRoomActive(true);
-    }
-    if (initialRole) {
+
+      const savedRole = sessionStorage.getItem(`referee_session_role_${initialRoomId}`) as SpeakerRole | null;
+      if (initialRole && ['a', 'b', 'ref'].includes(initialRole)) {
+        setLocalUserRole(initialRole);
+        sessionStorage.setItem(`referee_session_role_${initialRoomId}`, initialRole);
+        setPrepRole(initialRole);
+        setJoinRole(initialRole);
+      } else if (savedRole && ['a', 'b', 'ref'].includes(savedRole)) {
+        setLocalUserRole(savedRole);
+        setPrepRole(savedRole);
+        setJoinRole(savedRole);
+      } else {
+        // Guest entered room without a pre-assigned role link; open role verification gate
+        setIsRoleModalOpen(true);
+      }
+    } else if (initialRole) {
       setLocalUserRole(initialRole);
       setPrepRole(initialRole);
       setJoinRole(initialRole);
@@ -274,6 +290,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
     setCaseState(newCaseState);
     caseStateRef.current = newCaseState;
     setLocalUserRole(prepRole);
+    sessionStorage.setItem(`referee_session_role_${newRoomId}`, prepRole);
     setSessionTimer(0);
     setAirtimeA(1);
     setAirtimeB(1);
@@ -322,6 +339,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
         caseStateRef.current = remoteState;
       }
       setLocalUserRole(joinRole);
+      sessionStorage.setItem(`referee_session_role_${code}`, joinRole);
       setIsRoomActive(true);
       playTactileSound('success');
       addAuditLog(`Joined room ${code} as ${joinRole === 'a' ? 'Party A' : joinRole === 'b' ? 'Party B' : 'Referee'}.`, 'system');
@@ -405,16 +423,18 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   // Keyboard shortcut listener (1: Party A, 2: Party B, 3: Referee)
+  // Disabled in active rooms to protect identity and prevent speaker impersonation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA'].includes((document.activeElement as HTMLElement)?.tagName)) return;
+      if (isRoomActive) return; // Strict protocol: persona switching forbidden in live room
       if (e.key === '1') setSpeaker('a');
       if (e.key === '2') setSpeaker('b');
       if (e.key === '3') setSpeaker('ref');
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [isRoomActive]);
 
   // Timer interval and airtime balance
   useEffect(() => {
@@ -448,6 +468,8 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
   };
 
   const setSpeaker = (role: SpeakerRole) => {
+    // In active room sessions, participants cannot spoof or switch to another party's channel
+    if (isRoomActive && role !== localUserRole) return;
     playTactileSound('click');
     setCaseState(prev => ({ ...prev, activeSpeaker: role }));
     const name = role === 'a' ? caseState.partyA : role === 'b' ? caseState.partyB : 'Referee';
@@ -670,7 +692,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
     } else {
       try {
         const apiKey = getAssemblyAiApiKey();
-        const activeRoleSpeaker = localUserRole || caseState.activeSpeaker;
+        const activeRoleSpeaker = localUserRole; // STRICT: Always attribute mic audio to verified local participant
         const stream = await speechService.startStreaming(apiKey, {
           onPartialTranscript: (text) => {
             const name = activeRoleSpeaker === 'a' ? caseState.partyA : activeRoleSpeaker === 'b' ? caseState.partyB : 'Referee';
@@ -816,7 +838,8 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
 
   const handleInterject = () => {
     if (!interjectText.trim()) return;
-    commitSpokenSentence(interjectText.trim(), caseStateRef.current.activeSpeaker);
+    // Strictly commit statement under verified participant identity
+    commitSpokenSentence(interjectText.trim(), localUserRole);
     setInterjectText('');
     playTactileSound('click');
   };
@@ -1008,6 +1031,12 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
 
   // Signatures
   const handleSign = (party: 'a' | 'b') => {
+    if (isRoomActive && localUserRole !== party && localUserRole !== 'ref') {
+      alert(`Signature denied: You are authenticated as ${localUserRole === 'a' ? 'Party A' : localUserRole === 'b' ? 'Party B' : 'Referee'}. You can only execute digital signatures for your own verified party.`);
+      playTactileSound('alert');
+      return;
+    }
+
     playTactileSound('pin');
     const nextSignedA = party === 'a' ? true : caseState.signedA;
     const nextSignedB = party === 'b' ? true : caseState.signedB;
@@ -1837,7 +1866,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
             </div>
           </div>
 
-          {/* Active Voice Channel Switcher & Role Claiming */}
+          {/* Verified Participant Role & Audio Channel (Role Locked & Enforced) */}
           <div style={{
             background: 'var(--surface)',
             border: 'var(--border-width) solid var(--border)',
@@ -1845,97 +1874,136 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
             boxShadow: 'var(--shadow-md)',
             padding: 20
           }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-              <h4 style={{ fontSize: 15, fontWeight: 800 }}>Voice Attributor &amp; Role</h4>
-              <span className={`pill ${caseState.activeSpeaker === 'a' ? 'pill--purple' : caseState.activeSpeaker === 'b' ? 'pill--yellow' : 'pill--green'}`}>
-                {caseState.activeSpeaker === 'a' ? 'Party A' : caseState.activeSpeaker === 'b' ? 'Party B' : 'Referee'}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ShieldCheck size={16} color="var(--accent-green)" />
+                <h4 style={{ fontSize: 14, fontWeight: 800 }}>Verified Identity</h4>
+              </div>
+              <span className="pill pill--green mono" style={{ fontSize: 10, display: 'inline-flex', alignItems: 'center', gap: 4, background: '#ECFDF5', color: '#065F46', border: '1.5px solid #059669' }}>
+                <Lock size={10} /> ROLE LOCKED
               </span>
             </div>
 
-            {/* Participant Role Claim Selector */}
+            {/* Authenticated Participant Card */}
             <div style={{
-              marginBottom: 12,
-              padding: '8px 10px',
-              background: 'var(--bg)',
-              border: '1.5px solid var(--border)',
-              borderRadius: 'var(--radius-md)'
+              marginBottom: 14,
+              padding: '12px 14px',
+              background: localUserRole === 'a' ? '#F5F3FF' : localUserRole === 'b' ? '#FFFBEB' : '#ECFDF5',
+              border: `2px solid ${localUserRole === 'a' ? 'var(--primary)' : localUserRole === 'b' ? '#D97706' : '#059669'}`,
+              borderRadius: 'var(--radius-md)',
+              boxShadow: '2px 2px 0px var(--shadow-color)'
             }}>
-              <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--ink-dim)', marginBottom: 6, textTransform: 'uppercase' }}>
-                Your Assigned Persona:
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                <div style={{
+                  fontSize: 10,
+                  fontFamily: 'var(--font-mono)',
+                  fontWeight: 800,
+                  color: localUserRole === 'a' ? 'var(--primary)' : localUserRole === 'b' ? '#D97706' : '#065F46',
+                  textTransform: 'uppercase'
+                }}>
+                  {localUserRole === 'a' ? 'Party A · Claimant' : localUserRole === 'b' ? 'Party B · Respondent' : 'Neutral Arbiter'}
+                </div>
+                <span className="pill mono" style={{
+                  fontSize: 9.5,
+                  padding: '1px 6px',
+                  background: localUserRole === 'a' ? 'var(--primary)' : localUserRole === 'b' ? '#D97706' : '#059669',
+                  color: '#FFFFFF',
+                  border: 'none'
+                }}>
+                  YOU
+                </span>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
-                <button
-                  className={`btn btn--xs ${localUserRole === 'a' ? 'btn--primary' : 'btn--ghost'}`}
-                  style={{ justifyContent: 'center', fontSize: 11, padding: '4px 6px' }}
-                  onClick={() => {
-                    setLocalUserRole('a');
-                    setSpeaker('a');
-                  }}
-                  title="Claim role as Party A (Claimant)"
-                >
-                  Party A
-                </button>
-                <button
-                  className={`btn btn--xs ${localUserRole === 'b' ? 'btn--yellow' : 'btn--ghost'}`}
-                  style={{ justifyContent: 'center', fontSize: 11, padding: '4px 6px' }}
-                  onClick={() => {
-                    setLocalUserRole('b');
-                    setSpeaker('b');
-                  }}
-                  title="Claim role as Party B (Respondent)"
-                >
-                  Party B
-                </button>
-                <button
-                  className={`btn btn--xs ${localUserRole === 'ref' ? 'btn--green' : 'btn--ghost'}`}
-                  style={{ justifyContent: 'center', fontSize: 11, padding: '4px 6px' }}
-                  onClick={() => {
-                    setLocalUserRole('ref');
-                    setSpeaker('ref');
-                  }}
-                  title="Claim role as Neutral Arbiter"
-                >
-                  Referee
-                </button>
+              <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)', marginBottom: 2 }}>
+                {localUserRole === 'a' ? caseState.partyA : localUserRole === 'b' ? caseState.partyB : 'Presiding Arbiter'}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--ink-muted)' }}>
+                Channel #{localUserRole === 'a' ? '1' : localUserRole === 'b' ? '2' : '3'} · Impersonation disabled by protocol
               </div>
             </div>
 
-            <p style={{ fontSize: 12, color: 'var(--ink-muted)', marginBottom: 12 }}>
-              Route microphone stream or typing to the chosen party.
+            {/* Triadic Channel Presence & Floor Status */}
+            <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--ink-dim)', marginBottom: 8, textTransform: 'uppercase' }}>
+              Triadic Audio Channels
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+              {/* Channel 1: Party A */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '8px 10px',
+                borderRadius: 'var(--radius-sm)',
+                border: `1.5px solid ${localUserRole === 'a' ? 'var(--primary)' : 'var(--border)'}`,
+                background: caseState.activeSpeaker === 'a' ? 'rgba(124, 58, 237, 0.08)' : 'var(--bg)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: caseState.isMicActive && caseState.activeSpeaker === 'a' ? '#EF4444' : '#9CA3AF'
+                  }} className={caseState.isMicActive && caseState.activeSpeaker === 'a' ? 'pulse' : ''} />
+                  <span style={{ fontSize: 12, fontWeight: 700, color: localUserRole === 'a' ? 'var(--primary)' : 'var(--ink)' }}>
+                    {caseState.partyA.split(' ')[0]} (Party A)
+                  </span>
+                </div>
+                <span className="mono" style={{ fontSize: 10, color: localUserRole === 'a' ? 'var(--primary)' : 'var(--ink-muted)', fontWeight: 700 }}>
+                  {localUserRole === 'a' ? '★ YOUR MIC' : 'REMOTE'}
+                </span>
+              </div>
+
+              {/* Channel 2: Party B */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '8px 10px',
+                borderRadius: 'var(--radius-sm)',
+                border: `1.5px solid ${localUserRole === 'b' ? '#D97706' : 'var(--border)'}`,
+                background: caseState.activeSpeaker === 'b' ? 'rgba(217, 119, 6, 0.08)' : 'var(--bg)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: caseState.isMicActive && caseState.activeSpeaker === 'b' ? '#EF4444' : '#9CA3AF'
+                  }} className={caseState.isMicActive && caseState.activeSpeaker === 'b' ? 'pulse' : ''} />
+                  <span style={{ fontSize: 12, fontWeight: 700, color: localUserRole === 'b' ? '#D97706' : 'var(--ink)' }}>
+                    {caseState.partyB.split(' ')[0]} (Party B)
+                  </span>
+                </div>
+                <span className="mono" style={{ fontSize: 10, color: localUserRole === 'b' ? '#D97706' : 'var(--ink-muted)', fontWeight: 700 }}>
+                  {localUserRole === 'b' ? '★ YOUR MIC' : 'REMOTE'}
+                </span>
+              </div>
+
+              {/* Channel 3: Referee */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '8px 10px',
+                borderRadius: 'var(--radius-sm)',
+                border: `1.5px solid ${localUserRole === 'ref' ? '#059669' : 'var(--border)'}`,
+                background: caseState.activeSpeaker === 'ref' ? 'rgba(5, 150, 105, 0.08)' : 'var(--bg)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Scale size={12} color="#059669" />
+                  <span style={{ fontSize: 12, fontWeight: 700, color: localUserRole === 'ref' ? '#059669' : 'var(--ink)' }}>
+                    Referee (Neutral Rulings)
+                  </span>
+                </div>
+                <span className="mono" style={{ fontSize: 10, color: localUserRole === 'ref' ? '#059669' : 'var(--ink-muted)', fontWeight: 700 }}>
+                  {localUserRole === 'ref' ? '★ YOUR MIC' : 'TRIBUNAL'}
+                </span>
+              </div>
+            </div>
+
+            <p style={{ fontSize: 11, color: 'var(--ink-muted)', margin: 0, lineHeight: 1.4 }}>
+              Microphone stream and statements are cryptographically routed to your verified party.
             </p>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-              <button
-                className={`btn btn--sm ${caseState.activeSpeaker === 'a' ? 'btn--primary' : 'btn--ghost'}`}
-                style={{ flexDirection: 'column', padding: '8px 6px' }}
-                onClick={() => setSpeaker('a')}
-              >
-                <span style={{ fontSize: 9.5, opacity: 0.8 }}>[KEY 1]</span>
-                <span style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>
-                  {caseState.partyA.split(' ')[0]} (Party A)
-                </span>
-              </button>
-
-              <button
-                className={`btn btn--sm ${caseState.activeSpeaker === 'b' ? 'btn--yellow' : 'btn--ghost'}`}
-                style={{ flexDirection: 'column', padding: '8px 6px' }}
-                onClick={() => setSpeaker('b')}
-              >
-                <span style={{ fontSize: 9.5, opacity: 0.8 }}>[KEY 2]</span>
-                <span style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>
-                  {caseState.partyB.split(' ')[0]} (Party B)
-                </span>
-              </button>
-            </div>
-
-            <button
-              className={`btn btn--sm ${caseState.activeSpeaker === 'ref' ? 'btn--green' : 'btn--ghost'}`}
-              style={{ width: '100%' }}
-              onClick={() => setSpeaker('ref')}
-            >
-              <Scale size={13} />
-              <span>[KEY 3] Referee (Neutral Rulings)</span>
-            </button>
           </div>
 
           {/* Speaking Airtime Balance Meter */}
@@ -2058,18 +2126,23 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
               )}
             </div>
 
-            {/* Manual Interjection */}
+            {/* Manual Interjection (Strictly Attributed) */}
             <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1.5px dashed var(--border)' }}>
-              <label style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', marginBottom: 5, color: 'var(--ink-dim)' }}>
-                Manual Interjection
-              </label>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                <label style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', color: 'var(--ink-dim)' }}>
+                  Interject Testimony
+                </label>
+                <span className="mono" style={{ fontSize: 9.5, fontWeight: 800, color: localUserRole === 'a' ? 'var(--primary)' : localUserRole === 'b' ? '#D97706' : '#059669' }}>
+                  AS {localUserRole === 'a' ? 'PARTY A' : localUserRole === 'b' ? 'PARTY B' : 'REFEREE'}
+                </span>
+              </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <input
                   type="text"
                   value={interjectText}
                   onChange={(e) => setInterjectText(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleInterject(); }}
-                  placeholder="Type words as active party..."
+                  placeholder={`Spoken statement as ${localUserRole === 'a' ? caseState.partyA.split(' ')[0] : localUserRole === 'b' ? caseState.partyB.split(' ')[0] : 'Referee'}...`}
                   style={{
                     flex: 1,
                     padding: '7px 10px',
@@ -2080,7 +2153,12 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
                     color: 'var(--ink)'
                   }}
                 />
-                <button className="btn btn--sm btn--yellow" onClick={handleInterject} style={{ padding: '7px 10px' }}>
+                <button
+                  className={`btn btn--sm ${localUserRole === 'a' ? 'btn--primary' : localUserRole === 'b' ? 'btn--yellow' : 'btn--green'}`}
+                  onClick={handleInterject}
+                  style={{ padding: '7px 10px' }}
+                  title={`Submit testimony as ${localUserRole === 'a' ? 'Party A' : localUserRole === 'b' ? 'Party B' : 'Referee'}`}
+                >
                   <Send size={13} />
                 </button>
               </div>
@@ -2768,10 +2846,15 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
                     </div>
                     <button
                       className={`btn btn--sm ${caseState.signedA ? 'btn--ghost' : 'btn--primary'}`}
-                      disabled={caseState.signedA}
+                      disabled={caseState.signedA || (isRoomActive && localUserRole !== 'a' && localUserRole !== 'ref')}
                       onClick={() => handleSign('a')}
+                      title={isRoomActive && localUserRole !== 'a' && localUserRole !== 'ref' ? 'Only Party A can sign here' : ''}
                     >
-                      {caseState.signedA ? 'Signed ✓' : 'Sign as Party A ✍️'}
+                      {caseState.signedA
+                        ? 'Signed ✓'
+                        : (!isRoomActive || localUserRole === 'a' || localUserRole === 'ref')
+                        ? 'Sign as Party A ✍️'
+                        : 'Awaiting Party A Signature 🔒'}
                     </button>
                   </div>
 
@@ -2793,10 +2876,15 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
                     </div>
                     <button
                       className={`btn btn--sm ${caseState.signedB ? 'btn--ghost' : 'btn--yellow'}`}
-                      disabled={caseState.signedB}
+                      disabled={caseState.signedB || (isRoomActive && localUserRole !== 'b' && localUserRole !== 'ref')}
                       onClick={() => handleSign('b')}
+                      title={isRoomActive && localUserRole !== 'b' && localUserRole !== 'ref' ? 'Only Party B can sign here' : ''}
                     >
-                      {caseState.signedB ? 'Signed ✓' : 'Sign as Party B ✍️'}
+                      {caseState.signedB
+                        ? 'Signed ✓'
+                        : (!isRoomActive || localUserRole === 'b' || localUserRole === 'ref')
+                        ? 'Sign as Party B ✍️'
+                        : 'Awaiting Party B Signature 🔒'}
                     </button>
                   </div>
                 </div>
@@ -3057,7 +3145,7 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
               }}>
                 <div>
                   <div style={{ fontSize: 11, fontWeight: 700, color: '#065F46', textTransform: 'uppercase' }}>
-                    Active Room Code
+                    Hearing Room Code
                   </div>
                   <div className="mono" style={{ fontSize: 20, fontWeight: 800 }}>
                     {caseState.id}
@@ -3069,9 +3157,86 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
                 </span>
               </div>
 
+              {/* Primary: Direct Party B Invite Link with Pre-assigned Role */}
+              <div style={{
+                background: '#FFFBEB',
+                border: '2px solid #D97706',
+                borderRadius: 'var(--radius-md)',
+                padding: 14,
+                boxShadow: '2px 2px 0px #D97706'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 12.5, color: '#B45309', fontWeight: 800 }}>
+                    ★ Send to Party B ({caseState.partyB.split(' ')[0]})
+                  </span>
+                  <span className="pill mono" style={{ fontSize: 9.5, background: '#FDE68A', color: '#92400E', border: '1px solid #D97706' }}>
+                    ROLE PRE-LOCKED
+                  </span>
+                </div>
+                <p style={{ fontSize: 12, color: 'var(--ink-muted)', marginBottom: 10, lineHeight: 1.4 }}>
+                  Locks their participant identity to <b>Party B (Respondent)</b> upon entering. Prevents identity switching.
+                </p>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    type="text"
+                    readOnly
+                    value={`${window.location.origin}${window.location.pathname}?room=${caseState.id}&role=b`}
+                    className="mono"
+                    style={{
+                      flex: 1,
+                      padding: '8px 10px',
+                      borderRadius: 'var(--radius-md)',
+                      border: '1.5px solid var(--border)',
+                      fontSize: 11.5,
+                      background: '#FFFFFF'
+                    }}
+                  />
+                  <button
+                    className="btn btn--sm btn--yellow"
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${caseState.id}&role=b`);
+                      playTactileSound('click');
+                      alert('Party B invitation link copied to clipboard!');
+                    }}
+                  >
+                    <Copy size={13} />
+                    <span>Copy Link</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Secondary: Neutral Arbiter / Observer Link */}
+              <div style={{
+                background: 'var(--surface-alt)',
+                border: '1.5px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+                padding: 12
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, color: '#065F46', fontWeight: 800 }}>
+                    Invite Neutral Arbiter / Observer:
+                  </span>
+                  <button
+                    className="btn btn--xs btn--ghost"
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${caseState.id}&role=ref`);
+                      playTactileSound('click');
+                      alert('Neutral Arbiter link copied!');
+                    }}
+                  >
+                    <Copy size={12} />
+                    <span>Copy Arbiter Link</span>
+                  </button>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--ink-muted)' }}>
+                  Enters the hearing as the neutral presiding referee with ruling powers.
+                </div>
+              </div>
+
+              {/* General Share Link */}
               <div>
-                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, marginBottom: 4 }}>
-                  Direct Share Link (Join with Party Selection)
+                <label style={{ display: 'block', fontSize: 11.5, fontWeight: 700, marginBottom: 4, color: 'var(--ink-dim)' }}>
+                  Generic Room Link (Prompted to Verify Role upon Entry):
                 </label>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <input
@@ -3081,80 +3246,184 @@ export const MediationConsole: React.FC<MediationConsoleProps> = ({
                     className="mono"
                     style={{
                       flex: 1,
-                      padding: '8px 10px',
+                      padding: '7px 10px',
                       borderRadius: 'var(--radius-md)',
-                      border: '2px solid var(--border)',
-                      fontSize: 12,
+                      border: '1.5px solid var(--border)',
+                      fontSize: 11,
                       background: 'var(--bg)'
                     }}
                   />
                   <button
-                    className="btn btn--sm btn--primary"
+                    className="btn btn--xs btn--ghost"
                     onClick={() => {
                       navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${caseState.id}`);
                       playTactileSound('click');
-                      alert('Invitation link copied to clipboard!');
+                      alert('Room link copied!');
                     }}
                   >
-                    <Copy size={14} />
+                    <Copy size={12} />
                     <span>Copy</span>
                   </button>
                 </div>
               </div>
 
-              <div style={{
-                background: 'var(--surface-alt)',
-                border: '1.5px solid var(--border)',
-                borderRadius: 'var(--radius-md)',
-                padding: 12
-              }}>
-                <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>
-                  Or send pre-assigned role links:
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: 'var(--primary)', fontWeight: 700 }}>
-                      Party B ({caseState.partyB.split(' ')[0]}):
-                    </span>
-                    <button
-                      className="btn btn--xs btn--ghost"
-                      onClick={() => {
-                        navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${caseState.id}&role=b`);
-                        playTactileSound('click');
-                        alert('Party B link copied!');
-                      }}
-                    >
-                      Copy Party B Link
-                    </button>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: '#059669', fontWeight: 700 }}>
-                      Neutral Arbiter / Observer:
-                    </span>
-                    <button
-                      className="btn btn--xs btn--ghost"
-                      onClick={() => {
-                        navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${caseState.id}&role=ref`);
-                        playTactileSound('click');
-                        alert('Referee link copied!');
-                      }}
-                    >
-                      Copy Arbiter Link
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <p style={{ fontSize: 12, color: 'var(--ink-light)', lineHeight: 1.4, margin: 0 }}>
-                Anyone with this link will instantly join the dispute room. Transcripts, evidence claims, audio call, and signatures sync across both devices via Supabase Realtime in sub-50ms.
-              </p>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
                 <button className="btn btn--secondary" onClick={() => setIsInviteModalOpen(false)}>
-                  Close
+                  Done
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* IDENTITY GATE: CLAIM ROLE MODAL FOR JOINING GUESTS */}
+      {isRoleModalOpen && (
+        <div className="modal-overlay" style={{ zIndex: 1200 }}>
+          <div className="modal-dialog" style={{ maxWidth: 540, padding: 32 }}>
+            <div style={{ textAlign: 'center', marginBottom: 20 }}>
+              <div style={{
+                width: 48,
+                height: 48,
+                borderRadius: '50%',
+                background: 'var(--primary-subtle)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--primary)',
+                marginBottom: 12
+              }}>
+                <ShieldCheck size={26} />
+              </div>
+              <h3 style={{ fontSize: 22, fontWeight: 800, marginBottom: 6 }}>
+                Verify Your Participant Identity
+              </h3>
+              <p style={{ fontSize: 13.5, color: 'var(--ink-muted)', lineHeight: 1.5, margin: 0 }}>
+                You are entering hearing <b>{caseState.id}</b>: <i>"{caseState.title}"</i>.<br />
+                Select your verified identity to enter. Once claimed, your role is permanently locked for this session.
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+              {/* Option 1: Party B (Respondent) */}
+              <div
+                onClick={() => {
+                  setLocalUserRole('b');
+                  setCaseState(prev => ({ ...prev, activeSpeaker: 'b' }));
+                  sessionStorage.setItem(`referee_session_role_${caseState.id}`, 'b');
+                  setIsRoleModalOpen(false);
+                  playTactileSound('success');
+                  addAuditLog(`Joined hearing as Party B: ${caseState.partyB}`, 'system');
+                }}
+                style={{
+                  padding: '16px 18px',
+                  background: '#FFFBEB',
+                  border: '2.5px solid #D97706',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: '3px 3px 0px #D97706',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  transition: 'transform 0.1s ease'
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 10.5, fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#D97706', textTransform: 'uppercase', marginBottom: 2 }}>
+                    ★ Recommended for Invited Guest
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--ink)' }}>
+                    Party B (Respondent) — {caseState.partyB}
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--ink-muted)' }}>
+                    Testify and negotiate as respondent
+                  </div>
+                </div>
+                <button className="btn btn--sm btn--yellow" style={{ pointerEvents: 'none' }}>
+                  <span>Enter as Party B</span>
+                  <ArrowRight size={14} />
+                </button>
+              </div>
+
+              {/* Option 2: Referee (Neutral Arbiter) */}
+              <div
+                onClick={() => {
+                  setLocalUserRole('ref');
+                  setCaseState(prev => ({ ...prev, activeSpeaker: 'ref' }));
+                  sessionStorage.setItem(`referee_session_role_${caseState.id}`, 'ref');
+                  setIsRoleModalOpen(false);
+                  playTactileSound('success');
+                  addAuditLog('Joined hearing as Neutral Arbiter / Referee', 'system');
+                }}
+                style={{
+                  padding: '16px 18px',
+                  background: '#ECFDF5',
+                  border: '2.5px solid #059669',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: '3px 3px 0px #059669',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  transition: 'transform 0.1s ease'
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 10.5, fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#065F46', textTransform: 'uppercase', marginBottom: 2 }}>
+                    Official Tribunal
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--ink)' }}>
+                    Neutral Referee / Mediator
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--ink-muted)' }}>
+                    Impartial arbiter presiding over hearing
+                  </div>
+                </div>
+                <button className="btn btn--sm btn--green" style={{ pointerEvents: 'none' }}>
+                  <span>Enter as Referee</span>
+                  <ArrowRight size={14} />
+                </button>
+              </div>
+
+              {/* Option 3: Party A (Only if host reconnecting) */}
+              <div
+                onClick={() => {
+                  setLocalUserRole('a');
+                  setCaseState(prev => ({ ...prev, activeSpeaker: 'a' }));
+                  sessionStorage.setItem(`referee_session_role_${caseState.id}`, 'a');
+                  setIsRoleModalOpen(false);
+                  playTactileSound('success');
+                  addAuditLog(`Reconnected as Claimant: ${caseState.partyA}`, 'system');
+                }}
+                style={{
+                  padding: '12px 16px',
+                  background: 'var(--bg)',
+                  border: '1.5px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  opacity: 0.9
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--primary)' }}>
+                    Party A (Claimant) — {caseState.partyA}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--ink-muted)' }}>
+                    Select only if you originally created this hearing
+                  </div>
+                </div>
+                <span className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)', fontWeight: 700 }}>
+                  Reclaim Host Role →
+                </span>
+              </div>
+            </div>
+
+            <p style={{ fontSize: 11.5, color: 'var(--ink-muted)', textAlign: 'center', margin: 0 }}>
+              🔒 Identity Protocol: Role assignment is signed cryptographically on the case record.
+            </p>
           </div>
         </div>
       )}
